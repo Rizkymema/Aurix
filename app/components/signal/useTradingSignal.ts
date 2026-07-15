@@ -3,6 +3,8 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { CandlestickData } from '../chart/types';
 
+const APP_API_KEY = process.env.NEXT_PUBLIC_APP_API_KEY;
+
 /**
  * Trading Signal - Output dari AI Decision Engine
  */
@@ -112,6 +114,7 @@ export function useTradingSignal({
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          ...(APP_API_KEY ? { 'x-app-api-key': APP_API_KEY } : {}),
         },
         body: JSON.stringify({
           candles,

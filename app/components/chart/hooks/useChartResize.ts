@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useCallback, RefObject } from 'react';
+import { useEffect, useCallback, RefObject, useRef } from 'react';
 import { IChartApi } from 'lightweight-charts';
 
 interface UseChartResizeOptions {
@@ -9,6 +9,9 @@ interface UseChartResizeOptions {
 }
 
 export function useChartResize({ chartRef, containerRef }: UseChartResizeOptions) {
+  // ✅ FIX: Store pending RAF id to cancel on unmount
+  const pendingFrameRef = useRef<number | null>(null);
+
   const handleResize = useCallback(() => {
     if (chartRef.current && containerRef.current) {
       const { width, height } = containerRef.current.getBoundingClientRect();
@@ -26,7 +29,16 @@ export function useChartResize({ chartRef, containerRef }: UseChartResizeOptions
 
     // Create ResizeObserver for container resize detection
     const resizeObserver = new ResizeObserver(() => {
-      requestAnimationFrame(handleResize);
+      // ✅ FIX: Cancel previous RAF before queuing new one
+      if (pendingFrameRef.current !== null) {
+        cancelAnimationFrame(pendingFrameRef.current);
+      }
+      
+      // Queue resize with RAF for smooth rendering
+      pendingFrameRef.current = requestAnimationFrame(() => {
+        handleResize();
+        pendingFrameRef.current = null;  // Clear after execution
+      });
     });
 
     if (containerRef.current) {
@@ -34,11 +46,29 @@ export function useChartResize({ chartRef, containerRef }: UseChartResizeOptions
     }
 
     // Also listen to window resize
-    window.addEventListener('resize', handleResize);
+    const handleWindowResize = () => {
+      // ✅ FIX: Cancel previous RAF on window resize too
+      if (pendingFrameRef.current !== null) {
+        cancelAnimationFrame(pendingFrameRef.current);
+      }
+      
+      pendingFrameRef.current = requestAnimationFrame(() => {
+        handleResize();
+        pendingFrameRef.current = null;
+      });
+    };
+    
+    window.addEventListener('resize', handleWindowResize);
 
     return () => {
+      // ✅ FIX: Cancel pending RAF on unmount
+      if (pendingFrameRef.current !== null) {
+        cancelAnimationFrame(pendingFrameRef.current);
+        pendingFrameRef.current = null;
+      }
+      
       resizeObserver.disconnect();
-      window.removeEventListener('resize', handleResize);
+      window.removeEventListener('resize', handleWindowResize);
     };
   }, [handleResize, containerRef]);
 

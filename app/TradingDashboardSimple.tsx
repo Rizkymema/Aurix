@@ -7,6 +7,33 @@ import { useTradingSignal } from './components/signal/useTradingSignal';
 import { MarketSentimentPanel } from './components/analysis/MarketSentimentPanel';
 import { useZoomPan } from './components/chart/hooks/useZoomPan';
 import { MobileLayout } from './components/mobile';
+import ProbabilityDashboard from './components/probabilityEngine/ProbabilityDashboard';
+import { useProbabilityEngine } from './hooks/useProbabilityEngine';
+
+const APP_API_KEY = process.env.NEXT_PUBLIC_APP_API_KEY;
+
+// Validate price matches expected symbol range
+const isPriceValidForSymbol = (price: number, sym: string): boolean => {
+  const upperSymbol = sym.toUpperCase();
+  
+  // XAUUSD (Gold) - price should be $2000-$8000 range
+  if (upperSymbol === 'XAUUSD') {
+    return price >= 2000 && price <= 8000;
+  }
+  
+  // BTCUSDT - price should be > $10000
+  if (upperSymbol === 'BTCUSDT') {
+    return price >= 10000;
+  }
+  
+  // ETHUSDT - price should be > $500
+  if (upperSymbol === 'ETHUSDT') {
+    return price >= 500;
+  }
+  
+  // For other symbols, accept any positive price
+  return price > 0;
+};
 
 /**
  * AI MARKET VISUALIZATION & TRADING DECISION ENGINE
@@ -24,6 +51,35 @@ type SeriesApi = any;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type PriceLineApi = any;
 
+function getFeedBadge(status: 'realtime' | 'delayed' | 'stale' | 'unavailable') {
+  switch (status) {
+    case 'realtime':
+      return {
+        label: 'Realtime',
+        dot: 'bg-emerald-500',
+        text: 'text-emerald-400',
+      };
+    case 'delayed':
+      return {
+        label: 'Delayed',
+        dot: 'bg-amber-500',
+        text: 'text-amber-400',
+      };
+    case 'stale':
+      return {
+        label: 'Stale',
+        dot: 'bg-orange-500',
+        text: 'text-orange-400',
+      };
+    default:
+      return {
+        label: 'Unavailable',
+        dot: 'bg-red-500',
+        text: 'text-red-400',
+      };
+  }
+}
+
 export default function TradingDashboard() {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<ChartApi | null>(null);
@@ -31,11 +87,26 @@ export default function TradingDashboard() {
   const volumeSeriesRef = useRef<SeriesApi>(null);
   const tradingLinesRef = useRef<PriceLineApi[]>([]);
   
+  // Track current symbol to prevent stale data
+  const symbolRef = useRef<string>('BTCUSDT');
+  
   const [symbol, setSymbol] = useState('BTCUSDT');
   const [timeframe, setTimeframe] = useState<Timeframe>('1m'); // Default 1m for realtime feel
   const [isChartReady, setIsChartReady] = useState(false);
   const [candles, setCandles] = useState<CandlestickData[]>([]);
   const [mounted, setMounted] = useState(false);
+  
+  // Update symbolRef when symbol changes
+  useEffect(() => {
+    console.log(`[Dashboard] 🔄 Symbol changed to: ${symbol}`);
+    symbolRef.current = symbol;
+    // Clear candles when symbol changes
+    setCandles([]);
+    setCurrentPrice(null);
+    setPreviousClose(null);
+    setPriceChange(0);
+    setPriceChangePercent(0);
+  }, [symbol]);
   
   // REALTIME PRICE STATE (tidak boleh di-smooth atau di-delay)
   const [currentPrice, setCurrentPrice] = useState<number | null>(null);
@@ -52,9 +123,27 @@ export default function TradingDashboard() {
   
   // Visible range for AI analysis
   const [visibleCandles, setVisibleCandles] = useState<CandlestickData[]>([]);
+
+  // Probability Engine
+  const probEngine = useProbabilityEngine({
+    symbol,
+    timeframe,
+    candles: candles.map(c => ({
+      time: typeof c.time === 'number' ? c.time : Math.floor(new Date(c.time as unknown as string).getTime() / 1000),
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+      volume: c.volume,
+    })),
+    accountBalance: 10000,
+    riskPercent: 1,
+    autoRefreshMs: 30000,
+  });
   
   // Activity logs
   const [logs, setLogs] = useState<Array<{time: string; type: string; message: string}>>([]);
+  const lastFeedWarningRef = useRef<string | null>(null);
   
   // Mobile detection
   const [isMobile, setIsMobile] = useState(false);
@@ -83,10 +172,19 @@ export default function TradingDashboard() {
    */
   const handleHistoricalData = useCallback((data: CandlestickData[]) => {
     if (data.length > 0) {
+      const currentSymbol = symbolRef.current;
+      const lastCandle = data[data.length - 1];
+      
+      // Validate price matches current symbol
+      if (!isPriceValidForSymbol(lastCandle.close, currentSymbol)) {
+        console.warn(`[Dashboard] ⚠️ Price ${lastCandle.close.toFixed(2)} doesn't match ${currentSymbol}, discarding ${data.length} candles`);
+        return;
+      }
+      
+      console.log(`[Dashboard] ✓ Received ${data.length} candles for ${currentSymbol}, price: $${lastCandle.close.toFixed(2)}`);
       setCandles(data);
       
       // Set current price dari candle terakhir
-      const lastCandle = data[data.length - 1];
       setCurrentPrice(lastCandle.close);
       
       // Previous close untuk price change (24h ago atau candle pertama)
@@ -109,6 +207,13 @@ export default function TradingDashboard() {
    * - TIDAK boleh mengunci harga pada satu nilai
    */
   const handleRealtimeUpdate = useCallback((candle: CandlestickData) => {
+    // Validate price matches current symbol
+    const currentSymbol = symbolRef.current;
+    if (!isPriceValidForSymbol(candle.close, currentSymbol)) {
+      // Silently discard mismatched data
+      return;
+    }
+    
     // Update current price IMMEDIATELY (no delay/smoothing)
     setCurrentPrice(candle.close);
     setLastTickTime(Date.now());
@@ -140,12 +245,14 @@ export default function TradingDashboard() {
   }, [previousClose]);
 
   // WebSocket for real-time data
-  const { isConnected, error } = useWebSocket({
+  const { isConnected, error, feedStatus, dataSource, marketStatus } = useWebSocket({
     symbol,
     timeframe,
-    onMessage: handleRealtimeUpdate,
-    onHistoricalData: handleHistoricalData,
+    onMessageAction: handleRealtimeUpdate,
+    onHistoricalDataAction: handleHistoricalData,
   });
+
+  const feedBadge = useMemo(() => getFeedBadge(feedStatus), [feedStatus]);
 
   // Zoom & Pan hook - TradingView-style interactions
   const { resetZoom, fitAll, visibleCandles: zoomVisibleCount, isZoomedOut } = useZoomPan({
@@ -184,7 +291,7 @@ export default function TradingDashboard() {
    * - AI tidak mengontrol UI, hanya menyesuaikan output dengan kondisi chart
    * - Auto-refresh lebih cepat saat bot running (10 detik)
    */
-  const { signal, isLoading: signalLoading, fetchSignal } = useTradingSignal({
+  const { signal, fetchSignal } = useTradingSignal({
     symbol,
     timeframe,
     candles: visibleCandles.length > 50 ? visibleCandles : candles, // Use visible or full if not enough
@@ -243,12 +350,31 @@ export default function TradingDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tickCount, currentPrice, addLog]);
 
+  useEffect(() => {
+    if (!botRunning) {
+      lastFeedWarningRef.current = null;
+      return;
+    }
+
+    if (feedStatus === 'realtime') {
+      lastFeedWarningRef.current = null;
+      return;
+    }
+
+    const warningKey = `${feedStatus}:${dataSource || 'unknown'}`;
+    if (lastFeedWarningRef.current === warningKey) return;
+
+    lastFeedWarningRef.current = warningKey;
+    addLog('WARN', `Trade guard aktif: feed ${feedStatus}${dataSource ? ` (${dataSource})` : ''}`);
+  }, [botRunning, feedStatus, dataSource, addLog]);
+
   /**
    * AUTO EXECUTE TRADE when signal is valid and bot is running
    */
   useEffect(() => {
     if (!botRunning || !signal || signal.signal === 'WAIT') return;
     if (!currentPrice || !signal.entry) return;
+    if (feedStatus !== 'realtime') return;
     
     // Check if price reached entry level (within 0.1% tolerance)
     const entryTolerance = signal.entry * 0.001;
@@ -262,7 +388,10 @@ export default function TradingDashboard() {
         try {
           const response = await fetch('/api/bot/execute', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Content-Type': 'application/json',
+              ...(APP_API_KEY ? { 'x-app-api-key': APP_API_KEY } : {}),
+            },
             body: JSON.stringify({
               signal,
               currentPrice,
@@ -290,7 +419,7 @@ export default function TradingDashboard() {
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [botRunning, signal, currentPrice, botMode, symbol, timeframe, addLog]);
+  }, [botRunning, signal, currentPrice, botMode, symbol, timeframe, addLog, feedStatus]);
 
   // Initialize on client side only (fix hydration)
   useEffect(() => {
@@ -524,7 +653,12 @@ export default function TradingDashboard() {
       
       // Call backend stop
       try {
-        await fetch('/api/bot/stop', { method: 'POST' });
+        await fetch('/api/bot/stop', {
+          method: 'POST',
+          headers: {
+            ...(APP_API_KEY ? { 'x-app-api-key': APP_API_KEY } : {}),
+          },
+        });
       } catch { /* ignore */ }
     } else {
       // Start bot
@@ -535,7 +669,10 @@ export default function TradingDashboard() {
       try {
         await fetch('/api/bot/start', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(APP_API_KEY ? { 'x-app-api-key': APP_API_KEY } : {}),
+          },
           body: JSON.stringify({
             symbol,
             timeframe,
@@ -584,22 +721,22 @@ export default function TradingDashboard() {
         price={currentPrice || 0}
         priceDirection={priceDirection}
         timeframe={timeframe}
-        onTimeframeChange={(tf) => setTimeframe(tf as Timeframe)}
-        onSymbolChange={setSymbol}
+        onTimeframeChangeAction={(tf) => setTimeframe(tf as Timeframe)}
+        onSymbolChangeAction={setSymbol}
         botStatus={botRunning ? 'running' : 'stopped'}
         botMode={botMode}
-        onBotStart={() => {
+        onBotStartAction={() => {
           setBotRunning(true);
           addLog('INFO', `Bot started in ${botMode.toUpperCase()} mode`);
           fetchSignal();
         }}
-        onBotStop={() => {
+        onBotStopAction={() => {
           setBotRunning(false);
           addLog('INFO', 'Bot stopped');
         }}
-        onBotModeChange={(mode) => setBotMode(mode)}
+        onBotModeChangeAction={(mode) => setBotMode(mode)}
         aiEnabled={aiEnabled}
-        onAiToggle={setAiEnabled}
+        onAiToggleAction={setAiEnabled}
         signal={mobileSignal}
         sentimentData={sentimentData}
       >
@@ -674,9 +811,9 @@ export default function TradingDashboard() {
 
             {/* Connection Status */}
             <div className="flex items-center gap-2">
-              <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500' : 'bg-red-500'}`} />
-              <span className="text-xs text-gray-500">
-                {isConnected ? 'Live' : 'Offline'}
+              <div className={`w-2 h-2 rounded-full ${isConnected ? feedBadge.dot : 'bg-red-500'}`} />
+              <span className={`text-xs ${isConnected ? feedBadge.text : 'text-red-400'}`}>
+                {isConnected ? feedBadge.label : 'Offline'}
               </span>
             </div>
           </div>
@@ -693,8 +830,8 @@ export default function TradingDashboard() {
                 </span>
                 {/* Live indicator */}
                 <span className="relative flex h-2 w-2">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                  <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${feedBadge.dot} opacity-75`}></span>
+                  <span className={`relative inline-flex rounded-full h-2 w-2 ${feedBadge.dot}`}></span>
                 </span>
               </div>
               
@@ -743,20 +880,33 @@ export default function TradingDashboard() {
           {/* Realtime Status Overlay */}
           <div className="absolute bottom-3 left-3 z-10 bg-gray-900/80 backdrop-blur-sm rounded px-3 py-1.5 text-xs border border-gray-700">
             <div className="flex items-center gap-3">
-              <span className={isConnected ? 'text-emerald-400' : 'text-red-400'}>
-                {isConnected ? '● LIVE' : '○ OFFLINE'}
+              <span className={isConnected ? feedBadge.text : 'text-red-400'}>
+                {isConnected ? `● ${feedBadge.label.toUpperCase()}` : '○ OFFLINE'}
               </span>
               {mounted && lastTickTime && (
                 <span className="text-gray-500">
                   Updated: {new Date(lastTickTime).toLocaleTimeString()}
                 </span>
               )}
+              {dataSource && (
+                <span className="text-gray-500">
+                  Source: {dataSource}
+                </span>
+              )}
             </div>
           </div>
+
+          {symbol.includes('USD') && feedStatus !== 'realtime' && (
+            <div className="absolute top-3 left-3 right-32 z-10 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200 backdrop-blur-sm">
+              Harga belum true realtime. Feed saat ini: {feedBadge.label}
+              {dataSource ? ` dari ${dataSource}` : ''}.
+              {marketStatus ? ` Market: ${marketStatus}.` : ''}
+            </div>
+          )}
         </div>
 
         {/* Sidebar */}
-        <aside className="w-80 flex-shrink-0 border-l border-gray-800 bg-[#0D1117] overflow-y-auto">
+        <aside className="w-[500px] flex-shrink-0 border-l border-gray-800 bg-[#0D1117] overflow-y-auto">
           <div className="p-4 space-y-4">
             {/* Bot Control */}
             <div className="bg-gray-800/50 rounded-lg p-4">
@@ -805,85 +955,16 @@ export default function TradingDashboard() {
               </div>
             </div>
 
+            {/* PROBABILITY ENGINE — Primary Signal System */}
+            <ProbabilityDashboard
+              output={probEngine.output}
+              loading={probEngine.loading}
+              error={probEngine.error}
+              onRefresh={probEngine.refresh}
+            />
+
             {/* Market Sentiment from Kol API */}
             <MarketSentimentPanel symbol={symbol} />
-
-            {/* SIGNAL OUTPUT - Numerik Format */}
-            <div className={`rounded-lg p-4 border ${
-              signal?.signal === 'BUY' 
-                ? 'bg-emerald-500/10 border-emerald-500/30' 
-                : signal?.signal === 'SELL' 
-                  ? 'bg-red-500/10 border-red-500/30'
-                  : 'bg-gray-800/50 border-gray-700'
-            }`}>
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-sm font-semibold text-gray-400">📊 Trading Signal</h3>
-                {signalLoading && (
-                  <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-                )}
-              </div>
-              
-              {/* Signal Direction */}
-              <div className="text-center mb-4">
-                <div className={`text-4xl font-black ${
-                  signal?.signal === 'BUY' 
-                    ? 'text-emerald-400' 
-                    : signal?.signal === 'SELL' 
-                      ? 'text-red-400'
-                      : 'text-gray-500'
-                }`}>
-                  {signal?.signal || 'WAIT'}
-                </div>
-                {signal?.confidence ? (
-                  <div className="text-xs text-gray-500 mt-1">
-                    Confidence: {signal.confidence}%
-                  </div>
-                ) : null}
-              </div>
-              
-              {/* Trading Levels */}
-              {signal?.signal !== 'WAIT' && signal?.entry && (
-                <div className="space-y-2 font-mono text-sm">
-                  <div className="flex justify-between items-center py-1 border-b border-gray-700">
-                    <span className="text-blue-400">ENTRY</span>
-                    <span className="text-white font-bold">{formatPrice(signal.entry)}</span>
-                  </div>
-                  <div className="flex justify-between items-center py-1 border-b border-gray-700">
-                    <span className="text-red-400">STOP_LOSS</span>
-                    <span className="text-red-300">{formatPrice(signal.stop_loss)}</span>
-                  </div>
-                  <div className="flex justify-between items-center py-1 border-b border-gray-700">
-                    <span className="text-emerald-400">TAKE_PROFIT_1</span>
-                    <span className="text-emerald-300">{formatPrice(signal.take_profit_1)}</span>
-                  </div>
-                  <div className="flex justify-between items-center py-1">
-                    <span className="text-emerald-300">TAKE_PROFIT_2</span>
-                    <span className="text-emerald-200">{formatPrice(signal.take_profit_2)}</span>
-                  </div>
-                  
-                  {signal.risk_reward && (
-                    <div className="mt-2 pt-2 border-t border-gray-600 flex justify-between">
-                      <span className="text-gray-500 text-xs">RRR</span>
-                      <span className="text-yellow-400 text-xs">1:{signal.risk_reward}</span>
-                    </div>
-                  )}
-                </div>
-              )}
-              
-              {/* WAIT State */}
-              {(signal?.signal === 'WAIT' || !signal) && (
-                <div className="text-center text-gray-500 text-xs">
-                  <p className="mt-2">{signal?.reason || 'Analyzing market...'}</p>
-                </div>
-              )}
-              
-              {/* Signal Metadata */}
-              <div className="mt-3 pt-2 border-t border-gray-700 flex justify-between text-xs text-gray-600">
-                <span>{signal?.market || symbol}</span>
-                <span>{signal?.timeframe || timeframe}</span>
-                <span>{signal?.bot_mode || 'DRY_RUN'}</span>
-              </div>
-            </div>
 
             {/* Performance Stats */}
             <div className="bg-gray-800/50 rounded-lg p-4">
@@ -943,9 +1024,11 @@ export default function TradingDashboard() {
           </div>
           <div className="flex items-center gap-4">
             {error && <span className="text-red-400">⚠ {error}</span>}
-            <span className={isConnected ? 'text-emerald-500' : 'text-red-500'}>
-              {isConnected ? '● Realtime' : '○ Disconnected'}
+            <span className={isConnected ? feedBadge.text : 'text-red-500'}>
+              {isConnected ? `● ${feedBadge.label}` : '○ Disconnected'}
             </span>
+            {dataSource && <span>Source: {dataSource}</span>}
+            {marketStatus && <span>Market: {marketStatus}</span>}
             <span className="text-gray-600">|</span>
             <span>Visible: {visibleCandles.length} candles</span>
             {mounted && lastTickTime && (

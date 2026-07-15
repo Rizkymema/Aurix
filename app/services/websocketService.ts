@@ -15,6 +15,7 @@ interface WebSocketConfig {
   autoReconnect?: boolean;
   reconnectInterval?: number;
   maxRetries?: number;
+  apiKey?: string;  // ✅ Add API key support
 }
 
 export class WebSocketService {
@@ -30,12 +31,14 @@ export class WebSocketService {
   private onDisconnectHandlers: Set<ConnectionHandler> = new Set();
   private onErrorHandlers: Set<MessageHandler> = new Set();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private apiKey?: string;  // ✅ Store API key
 
   constructor(config: WebSocketConfig) {
     this.url = config.url;
     this.autoReconnect = config.autoReconnect ?? true;
     this.reconnectInterval = config.reconnectInterval ?? 3000;
     this.maxRetries = config.maxRetries ?? 10;
+    this.apiKey = config.apiKey;  // ✅ Store API key from config
   }
 
   connect(): void {
@@ -46,7 +49,14 @@ export class WebSocketService {
     this.isConnecting = true;
     
     try {
-      this.ws = new WebSocket(this.url);
+      // ✅ SECURITY: Append API key as query parameter if provided
+      let wsUrl = this.url;
+      if (this.apiKey) {
+        const separator = this.url.includes('?') ? '&' : '?';
+        wsUrl = `${this.url}${separator}token=${encodeURIComponent(this.apiKey)}`;
+      }
+      
+      this.ws = new WebSocket(wsUrl);
       
       this.ws.onopen = () => {
         console.log('[WebSocket] Connected:', this.url);
@@ -107,7 +117,16 @@ export class WebSocketService {
     }
     
     this.retryCount++;
-    const delay = this.reconnectInterval * Math.min(this.retryCount, 5);
+
+    if (this.retryCount > this.maxRetries) {
+      console.error(`[WebSocket] Max retries (${this.maxRetries}) exhausted. Call connect() manually.`);
+      return;
+    }
+
+    // Exponential backoff with jitter: 3s → 6s → 12s → 24s → cap 30s
+    const base = Math.min(this.reconnectInterval * Math.pow(2, this.retryCount - 1), 30000);
+    const jitter = base * 0.2 * (Math.random() * 2 - 1);
+    const delay = Math.round(base + jitter);
     
     console.log(`[WebSocket] Reconnecting in ${delay}ms (attempt ${this.retryCount}/${this.maxRetries})`);
     
@@ -241,64 +260,144 @@ class BotWebSocketManager {
 class BinanceWebSocketManager {
   private connections: Map<string, WebSocket> = new Map();
   private listeners: Map<string, Set<(data: any) => void>> = new Map();
+  private reconnectTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  private retryCounts: Map<string, number> = new Map();
+  private intentionallyClosed: Set<string> = new Set();
+
+  private static MAX_RETRIES = 30;
+  private static BACKOFF_BASE_MS = 1000;
+  private static BACKOFF_MAX_MS = 30000;
+  private static HEARTBEAT_MS = 25000; // Binance sends pings every ~20s
+  private heartbeatTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+
+  private _backoff(attempt: number): number {
+    const base = Math.min(
+      BinanceWebSocketManager.BACKOFF_BASE_MS * Math.pow(2, attempt),
+      BinanceWebSocketManager.BACKOFF_MAX_MS,
+    );
+    return Math.round(base + base * 0.2 * (Math.random() * 2 - 1));
+  }
+
+  private _resetHeartbeat(streamId: string, ws: WebSocket): void {
+    const existing = this.heartbeatTimers.get(streamId);
+    if (existing) clearTimeout(existing);
+
+    this.heartbeatTimers.set(streamId, setTimeout(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        console.warn(`[Binance WS] Heartbeat timeout for ${streamId}, reconnecting`);
+        ws.close();
+      }
+    }, BinanceWebSocketManager.HEARTBEAT_MS));
+  }
+
+  private _scheduleReconnect(streamId: string, key: string): void {
+    if (this.intentionallyClosed.has(streamId)) return;
+
+    const attempt = this.retryCounts.get(streamId) || 0;
+    if (attempt >= BinanceWebSocketManager.MAX_RETRIES) {
+      console.error(`[Binance WS] Max retries for ${streamId}`);
+      return;
+    }
+
+    const delay = this._backoff(attempt);
+    this.retryCounts.set(streamId, attempt + 1);
+
+    console.log(`[Binance WS] Reconnecting ${streamId} in ${delay}ms (attempt ${attempt + 1})`);
+
+    const timer = setTimeout(() => {
+      this.reconnectTimers.delete(streamId);
+      // Re-establish connection if listeners still exist
+      if (this.listeners.has(key) && (this.listeners.get(key)?.size ?? 0) > 0) {
+        this._createKlineConnection(streamId, key);
+      }
+    }, delay);
+
+    this.reconnectTimers.set(streamId, timer);
+  }
+
+  private _createKlineConnection(streamId: string, key: string): void {
+    // Close existing if any
+    const existing = this.connections.get(streamId);
+    if (existing) {
+      try { existing.close(); } catch { /* ignore */ }
+      this.connections.delete(streamId);
+    }
+
+    const ws = new WebSocket(`wss://stream.binance.com:9443/ws/${streamId}`);
+
+    ws.onopen = () => {
+      console.log(`[Binance WS] Connected: ${streamId}`);
+      this.retryCounts.set(streamId, 0);
+      this._resetHeartbeat(streamId, ws);
+    };
+
+    ws.onmessage = (event) => {
+      this._resetHeartbeat(streamId, ws);
+      try {
+        const data = JSON.parse(event.data);
+        if (data.k) {
+          const kline = {
+            time: Math.floor(data.k.t / 1000),
+            open: parseFloat(data.k.o),
+            high: parseFloat(data.k.h),
+            low: parseFloat(data.k.l),
+            close: parseFloat(data.k.c),
+            volume: parseFloat(data.k.v),
+            isClosed: data.k.x,
+          };
+          this.listeners.get(key)?.forEach(h => h(kline));
+        }
+      } catch (error) {
+        console.error('[Binance WS] Parse error:', error);
+      }
+    };
+
+    ws.onerror = () => {
+      console.error(`[Binance WS] Error on ${streamId}`);
+    };
+
+    ws.onclose = () => {
+      console.log(`[Binance WS] Closed: ${streamId}`);
+      this.connections.delete(streamId);
+
+      const hb = this.heartbeatTimers.get(streamId);
+      if (hb) { clearTimeout(hb); this.heartbeatTimers.delete(streamId); }
+
+      this._scheduleReconnect(streamId, key);
+    };
+
+    this.connections.set(streamId, ws);
+  }
 
   subscribeKline(symbol: string, interval: string, handler: (data: any) => void): () => void {
     const streamId = `${symbol.toLowerCase()}@kline_${interval}`;
     const key = `kline:${streamId}`;
     
-    // Register handler
     if (!this.listeners.has(key)) {
       this.listeners.set(key, new Set());
     }
     this.listeners.get(key)!.add(handler);
 
-    // Create connection if not exists
+    this.intentionallyClosed.delete(streamId);
+
     if (!this.connections.has(streamId)) {
-      const ws = new WebSocket(`wss://stream.binance.com:9443/ws/${streamId}`);
-      
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.k) {
-            const kline = {
-              time: Math.floor(data.k.t / 1000),
-              open: parseFloat(data.k.o),
-              high: parseFloat(data.k.h),
-              low: parseFloat(data.k.l),
-              close: parseFloat(data.k.c),
-              volume: parseFloat(data.k.v),
-              isClosed: data.k.x,
-            };
-            this.listeners.get(key)?.forEach(h => h(kline));
-          }
-        } catch (error) {
-          console.error('[Binance WS] Parse error:', error);
-        }
-      };
-
-      ws.onerror = (error) => {
-        console.error('[Binance WS] Error:', error);
-      };
-
-      ws.onclose = () => {
-        console.log('[Binance WS] Closed:', streamId);
-        this.connections.delete(streamId);
-      };
-
-      this.connections.set(streamId, ws);
+      this._createKlineConnection(streamId, key);
     }
 
-    // Return unsubscribe function
     return () => {
       this.listeners.get(key)?.delete(handler);
       
-      // Close connection if no more listeners
       if (this.listeners.get(key)?.size === 0) {
+        this.intentionallyClosed.add(streamId);
         const ws = this.connections.get(streamId);
-        if (ws) {
-          ws.close();
-          this.connections.delete(streamId);
-        }
+        if (ws) { try { ws.close(); } catch { /* ignore */ } }
+        this.connections.delete(streamId);
+
+        const timer = this.reconnectTimers.get(streamId);
+        if (timer) { clearTimeout(timer); this.reconnectTimers.delete(streamId); }
+
+        const hb = this.heartbeatTimers.get(streamId);
+        if (hb) { clearTimeout(hb); this.heartbeatTimers.delete(streamId); }
       }
     };
   }
@@ -312,9 +411,16 @@ class BinanceWebSocketManager {
     }
     this.listeners.get(key)!.add(handler);
 
+    this.intentionallyClosed.delete(streamId);
+
     if (!this.connections.has(streamId)) {
       const ws = new WebSocket(`wss://stream.binance.com:9443/ws/${streamId}`);
       
+      ws.onopen = () => {
+        console.log(`[Binance WS] Ticker connected: ${streamId}`);
+        this.retryCounts.set(streamId, 0);
+      };
+
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
@@ -332,22 +438,50 @@ class BinanceWebSocketManager {
         }
       };
 
+      ws.onerror = () => {
+        console.error(`[Binance WS] Ticker error: ${streamId}`);
+      };
+
+      ws.onclose = () => {
+        console.log(`[Binance WS] Ticker closed: ${streamId}`);
+        this.connections.delete(streamId);
+        this._scheduleReconnect(streamId, key);
+      };
+
       this.connections.set(streamId, ws);
     }
 
     return () => {
       this.listeners.get(key)?.delete(handler);
       if (this.listeners.get(key)?.size === 0) {
+        this.intentionallyClosed.add(streamId);
         this.connections.get(streamId)?.close();
         this.connections.delete(streamId);
+
+        const timer = this.reconnectTimers.get(streamId);
+        if (timer) { clearTimeout(timer); this.reconnectTimers.delete(streamId); }
       }
     };
   }
 
   disconnectAll(): void {
-    this.connections.forEach(ws => ws.close());
+    // Mark all as intentionally closed to prevent reconnects
+    for (const streamId of this.connections.keys()) {
+      this.intentionallyClosed.add(streamId);
+    }
+
+    this.connections.forEach(ws => { try { ws.close(); } catch { /* ignore */ } });
     this.connections.clear();
     this.listeners.clear();
+
+    this.reconnectTimers.forEach(t => clearTimeout(t));
+    this.reconnectTimers.clear();
+
+    this.heartbeatTimers.forEach(t => clearTimeout(t));
+    this.heartbeatTimers.clear();
+
+    this.retryCounts.clear();
+    this.intentionallyClosed.clear();
   }
 }
 

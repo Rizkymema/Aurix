@@ -29,12 +29,22 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+*.bak
+
+# Python runtime artifacts
+__pycache__/
+*.py[cod]
+*.log
 
 # env files (can opt-in for committing if needed)
 .env*
 
 # vercel
 .vercel
+
+# Local agent instructions and private Claude skills
+/.agents/
+/.claude/skills/
 
 # typescript
 *.tsbuildinfo

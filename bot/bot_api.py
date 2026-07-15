@@ -11,16 +11,25 @@ Features:
 
 import asyncio
 import json
+import os
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 
 from trading_bot import TradingBot, BotConfig, BotState, BotLog, TradeRecord
+
+# Import AI Signal API router
+try:
+    from ai_signal_api import router as ai_signal_router
+    AI_SIGNAL_AVAILABLE = True
+except ImportError:
+    AI_SIGNAL_AVAILABLE = False
+    print("⚠️ AI Signal API not available - ai_signal_api.py not found")
 
 
 # =======================
@@ -100,6 +109,47 @@ bot_task: Optional[asyncio.Task] = None
 
 
 # =======================
+# Security Helpers
+# =======================
+
+def verify_api_key(api_key: Optional[str]) -> bool:
+    """
+    Verify API key for authentication.
+    
+    🔒 SECURITY: Validates API key against environment variable.
+    Returns True if valid, False otherwise.
+    """
+    if not api_key:
+        return False
+    
+    expected_key = os.getenv("BOT_API_KEY")
+    if not expected_key:
+        # If no key is set in environment, allow access (dev mode)
+        # ⚠️ WARNING: Set BOT_API_KEY in production!
+        print("⚠️ WARNING: BOT_API_KEY not set in environment - allowing access")
+        return True
+    
+    return api_key == expected_key
+
+
+async def verify_websocket_token(websocket: WebSocket) -> bool:
+    """
+    Verify WebSocket connection token.
+    
+    Checks query parameter 'token' or header 'x-bot-api-key'.
+    Returns True if valid, False otherwise.
+    """
+    # Check query parameter first
+    token = websocket.query_params.get("token")
+    
+    # If not in query, check headers
+    if not token:
+        token = websocket.headers.get("x-bot-api-key")
+    
+    return verify_api_key(token)
+
+
+# =======================
 # Bot Callbacks
 # =======================
 
@@ -172,13 +222,22 @@ app = FastAPI(
 )
 
 # CORS middleware untuk Next.js
+# 🔒 SECURITY: Use environment variable for allowed origins, NO wildcard with credentials
+allowed_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:3001").split(",")
+allowed_origins = [origin.strip() for origin in allowed_origins if origin.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001", "*"],
+    allow_origins=allowed_origins,  # ✅ No wildcard
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],  # ✅ Specific methods only
+    allow_headers=["Content-Type", "Authorization", "x-bot-api-key"],  # ✅ Specific headers only
 )
+
+# Include AI Signal API router if available
+if AI_SIGNAL_AVAILABLE:
+    app.include_router(ai_signal_router)
+    print("✅ AI Signal API router included")
 
 
 # =======================
@@ -444,8 +503,23 @@ async def execute_signal(signal: TradingSignal):
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket untuk real-time updates"""
+    """
+    WebSocket untuk real-time updates
+    
+    🔒 SECURITY: Requires authentication via token query param or x-bot-api-key header
+    Example: ws://localhost:8000/ws?token=your-api-key
+    """
+    # ✅ SECURITY: Verify authentication before accepting connection
+    is_authenticated = await verify_websocket_token(websocket)
+    
+    if not is_authenticated:
+        await websocket.close(code=1008, reason="Unauthorized - Invalid or missing API key")
+        print("🚫 WebSocket connection rejected - invalid token")
+        return
+    
+    # Accept connection after successful authentication
     await manager.connect(websocket)
+    print("✅ WebSocket connection authenticated")
     
     # Send initial status
     if bot:
@@ -498,10 +572,36 @@ async def websocket_endpoint(websocket: WebSocket):
 # =======================
 
 if __name__ == "__main__":
+    # 🔒 SECURITY: Read config from environment variables
+    host = os.getenv("HOST", "127.0.0.1")  # ✅ Default to localhost only
+    port = int(os.getenv("PORT", "8000"))
+    environment = os.getenv("ENVIRONMENT", "development")
+    reload = environment == "development"  # ✅ Only reload in dev
+    
+    # Log configuration
+    print(f"""
+╔══════════════════════════════════════════════════════════════╗
+║  🚀 Starting Bot API Server                                 ║
+╠══════════════════════════════════════════════════════════════╣
+║  Host: {host:<51}║
+║  Port: {port:<51}║
+║  Environment: {environment:<45}║
+║  Reload: {str(reload):<50}║
+╚══════════════════════════════════════════════════════════════╝
+    """)
+    
+    if host == "0.0.0.0":
+        print("⚠️  WARNING: Server is exposed to all network interfaces!")
+        print("⚠️  This is a security risk. Set HOST=127.0.0.1 for localhost-only access.")
+    
+    if not os.getenv("BOT_API_KEY"):
+        print("⚠️  WARNING: BOT_API_KEY not set - API endpoints are unprotected!")
+        print("⚠️  Set BOT_API_KEY in .env.local for production.")
+    
     uvicorn.run(
         "bot_api:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
+        host=host,
+        port=port,
+        reload=reload,
         log_level="info"
     )

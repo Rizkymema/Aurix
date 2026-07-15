@@ -4,9 +4,9 @@ import React from 'react';
 
 interface HeaderProps {
   symbol: string;
-  onSymbolChange?: (symbol: string) => void;
+  onSymbolChangeAction?: (symbol: string) => void;
   activeTab: string;
-  onTabChange?: (tab: string) => void;
+  onTabChangeAction?: (tab: string) => void;
 }
 
 const SYMBOLS = [
@@ -22,7 +22,7 @@ const TABS = [
   { id: 'settings', label: 'Settings', icon: '⚙️' },
 ];
 
-export function Header({ symbol, onSymbolChange, activeTab, onTabChange }: HeaderProps) {
+export function Header({ symbol, onSymbolChangeAction, activeTab, onTabChangeAction }: HeaderProps) {
   return (
     <div className="h-14 flex items-center justify-between px-4">
       {/* Logo */}
@@ -38,7 +38,7 @@ export function Header({ symbol, onSymbolChange, activeTab, onTabChange }: Heade
         {TABS.map(tab => (
           <button
             key={tab.id}
-            onClick={() => onTabChange?.(tab.id)}
+            onClick={() => onTabChangeAction?.(tab.id)}
             className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
               activeTab === tab.id
                 ? 'bg-blue-600 text-white'
@@ -56,7 +56,7 @@ export function Header({ symbol, onSymbolChange, activeTab, onTabChange }: Heade
         {/* Symbol Dropdown */}
         <select
           value={symbol}
-          onChange={(e) => onSymbolChange?.(e.target.value)}
+          onChange={(e) => onSymbolChangeAction?.(e.target.value)}
           className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
         >
           {SYMBOLS.map(s => (

@@ -48,9 +48,9 @@ interface FullChartProps {
     useZigZag?: boolean;
     zigZagDeviation?: number;
   };
-  onHistoricalData?: (data: CandlestickData[]) => void;
-  onRealtimeUpdate?: (candle: CandlestickData) => void;
-  onTimeframeChange?: (timeframe: Timeframe) => void;
+  onHistoricalDataAction?: (data: CandlestickData[]) => void;
+  onRealtimeUpdateAction?: (candle: CandlestickData) => void;
+  onTimeframeChangeAction?: (timeframe: Timeframe) => void;
 }
 
 // Zone drawing interface
@@ -143,9 +143,9 @@ export function FullFeaturedChart({
   showTradingLevels = true,
   signal = null,
   structureConfig,
-  onHistoricalData,
-  onRealtimeUpdate,
-  onTimeframeChange,
+  onHistoricalDataAction,
+  onRealtimeUpdateAction,
+  onTimeframeChangeAction,
 }: FullChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartContainerRef = useRef<HTMLDivElement>(null);
@@ -156,6 +156,9 @@ export function FullFeaturedChart({
   const zoneSeriesRef = useRef<any[]>([]);
   const tradingLevelSeriesRef = useRef<any[]>([]);
   const markersPluginRef = useRef<any>(null);
+  
+  // Track current symbol to prevent stale data from being displayed
+  const symbolRef = useRef<string>(symbol);
 
   const [timeframe, setTimeframe] = useState<Timeframe>(initialTimeframe);
   const [currentPrice, setCurrentPrice] = useState<number | undefined>();
@@ -163,6 +166,9 @@ export function FullFeaturedChart({
   const [historicalData, setHistoricalData] = useState<CandlestickData[]>([]);
   const [isChartReady, setIsChartReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const historicalDataRef = useRef<CandlestickData[]>([]);
+  const lastCandleTimeRef = useRef<number | null>(null);
   
   // Panel visibility - using activePanel for single panel at a time
   const [activePanel, setActivePanel] = useState<'structure' | 'zones' | 'patterns' | null>('zones');
@@ -173,18 +179,25 @@ export function FullFeaturedChart({
     setHistoricalData([]);
     setCurrentPrice(undefined);
     setPriceChange(undefined);
-    onTimeframeChange?.(newTimeframe);
-  }, [onTimeframeChange]);
+    onTimeframeChangeAction?.(newTimeframe);
+  }, [onTimeframeChangeAction]);
 
   // Reset data when symbol changes
   useEffect(() => {
+    // Update symbolRef immediately when symbol changes
+    symbolRef.current = symbol;
+    
+    console.log(`[Chart] 🔄 Symbol changed to: ${symbol} - Clearing all data`);
+    
     // Clear historical data to force fresh load
     setHistoricalData([]);
     setCurrentPrice(undefined);
     setPriceChange(undefined);
     setError(null);
+    historicalDataRef.current = [];
+    lastCandleTimeRef.current = null;
     
-    // Clear chart series data if available
+    // Clear chart series data AND reset scale
     if (candlestickSeriesRef.current) {
       try {
         candlestickSeriesRef.current.setData([]);
@@ -193,6 +206,17 @@ export function FullFeaturedChart({
     if (volumeSeriesRef.current) {
       try {
         volumeSeriesRef.current.setData([]);
+      } catch (e) { /* ignore */ }
+    }
+    
+    // Force chart to reset price scale
+    if (chartRef.current) {
+      try {
+        chartRef.current.priceScale('right').applyOptions({
+          autoScale: true,
+        });
+        chartRef.current.timeScale().fitContent();
+        console.log(`[Chart] 🔄 Chart scales reset for ${symbol}`);
       } catch (e) { /* ignore */ }
     }
   }, [symbol]);
@@ -239,8 +263,38 @@ export function FullFeaturedChart({
     minReliability: 'MEDIUM',
   });
 
+  // Check if price is valid for the symbol (to detect wrong data)
+  const isPriceValidForSymbol = useCallback((price: number, sym: string): boolean => {
+    const upperSymbol = sym.toUpperCase();
+    
+    // XAUUSD (Gold) - price should be $2000-$8000 range
+    if (upperSymbol === 'XAUUSD') {
+      return price >= 2000 && price <= 8000;
+    }
+    
+    // BTCUSDT - price should be > $10000
+    if (upperSymbol === 'BTCUSDT') {
+      return price >= 10000;
+    }
+    
+    // ETHUSDT - price should be > $500
+    if (upperSymbol === 'ETHUSDT') {
+      return price >= 500;
+    }
+    
+    // For other symbols, accept any positive price
+    return price > 0;
+  }, []);
+
   // Handle incoming real-time data
   const handleRealtimeData = useCallback((data: CandlestickData) => {
+    // Validate price matches current symbol
+    const currentSymbol = symbolRef.current;
+    if (!isPriceValidForSymbol(data.close, currentSymbol)) {
+      console.warn(`[Chart] ⚠️ Realtime price ${data.close.toFixed(2)} doesn't match ${currentSymbol}, discarding`);
+      return;
+    }
+    
     if (candlestickSeriesRef.current && volumeSeriesRef.current && isChartReady) {
       try {
         candlestickSeriesRef.current.update({
@@ -260,32 +314,51 @@ export function FullFeaturedChart({
         });
 
         setCurrentPrice(data.close);
+
+        // Keep a mutable ref updated every tick, but only update state on candle close.
+        const lastTime = lastCandleTimeRef.current;
+        const refData = historicalDataRef.current;
+        if (lastTime === null) {
+          historicalDataRef.current = [data];
+          lastCandleTimeRef.current = data.time;
+          setHistoricalData([data]);
+        } else if (data.time > lastTime) {
+          historicalDataRef.current = [...refData, data].slice(-1000);
+          lastCandleTimeRef.current = data.time;
+          setHistoricalData(historicalDataRef.current);
+        } else if (data.time === lastTime && refData.length > 0) {
+          refData[refData.length - 1] = data;
+        }
         
-        setHistoricalData(prev => {
-          const newData = [...prev];
-          const lastIndex = newData.findIndex(c => c.time === data.time);
-          if (lastIndex >= 0) {
-            newData[lastIndex] = data;
-          } else {
-            newData.push(data);
-          }
-          return newData;
-        });
-        
-        onRealtimeUpdate?.(data);
+        onRealtimeUpdateAction?.(data);
       } catch (err) {
         console.error('Error updating chart:', err);
       }
     }
-  }, [isChartReady, onRealtimeUpdate]);
+  }, [isChartReady, onRealtimeUpdateAction, isPriceValidForSymbol]);
 
   // Handle historical data
   const handleHistoricalData = useCallback((data: CandlestickData[]) => {
-    console.log(`[Chart] Received ${data.length} historical candles for ${symbol}`);
+    // Validate that data matches current symbol using symbolRef
+    const currentSymbol = symbolRef.current;
+    console.log(`[Chart] Received ${data.length} historical candles, current symbol: ${currentSymbol}`);
+    
     if (data.length > 0) {
-      console.log(`[Chart] Price range: ${data[0]?.close.toFixed(2)} to ${data[data.length-1]?.close.toFixed(2)}`);
+      const avgPrice = data[data.length - 1].close;
+      console.log(`[Chart] Price range: ${data[0]?.close.toFixed(2)} to ${avgPrice.toFixed(2)}`);
+      
+      // Validate price range matches expected symbol
+      if (!isPriceValidForSymbol(avgPrice, currentSymbol)) {
+        console.warn(`[Chart] ⚠️ Price ${avgPrice.toFixed(2)} doesn't match expected range for ${currentSymbol}, discarding data`);
+        return;
+      }
     }
-    setHistoricalData(data);
+    
+    historicalDataRef.current = data.slice(-1000);
+    lastCandleTimeRef.current = historicalDataRef.current.length > 0
+      ? historicalDataRef.current[historicalDataRef.current.length - 1].time
+      : null;
+    setHistoricalData(historicalDataRef.current);
 
     if (data.length > 0) {
       const firstPrice = data[0].close;
@@ -294,16 +367,16 @@ export function FullFeaturedChart({
       setPriceChange(change);
       setCurrentPrice(lastPrice);
       
-      onHistoricalData?.(data);
+      onHistoricalDataAction?.(data);
     }
-  }, [onHistoricalData, symbol]);
+  }, [onHistoricalDataAction, isPriceValidForSymbol]);
 
   // WebSocket hook
-  const { isConnected, reconnect } = useWebSocket({
+  const { isConnected, connectionState, reconnect, retryCount } = useWebSocket({
     symbol,
     timeframe,
-    onMessage: handleRealtimeData,
-    onHistoricalData: handleHistoricalData,
+    onMessageAction: handleRealtimeData,
+    onHistoricalDataAction: handleHistoricalData,
   });
 
   // Initialize chart
@@ -373,6 +446,12 @@ export function FullFeaturedChart({
             alignLabels: true,
             entireTextOnly: false,
           },
+          localization: {
+            // CRITICAL: Prevent lightweight-charts from converting timestamps
+            // to browser-local timezone. All our timestamps are UTC.
+            locale: 'en-US',
+            dateFormat: 'yyyy-MM-dd',
+          },
           timeScale: {
             borderColor: CHART_COLORS.border,
             borderVisible: false,  // Cleaner without border
@@ -387,9 +466,10 @@ export function FullFeaturedChart({
             rightBarStaysOnScroll: true,
             shiftVisibleRangeOnNewBar: true,
             tickMarkFormatter: (time: number) => {
+              // MUST use UTC methods — timestamps are Unix seconds UTC
               const date = new Date(time * 1000);
-              const hours = date.getHours().toString().padStart(2, '0');
-              const minutes = date.getMinutes().toString().padStart(2, '0');
+              const hours = date.getUTCHours().toString().padStart(2, '0');
+              const minutes = date.getUTCMinutes().toString().padStart(2, '0');
               return `${hours}:${minutes}`;
             },
           },
@@ -496,7 +576,20 @@ export function FullFeaturedChart({
     try {
       const minPrice = Math.min(...historicalData.map(d => d.low));
       const maxPrice = Math.max(...historicalData.map(d => d.high));
-      console.log(`[Chart] Rendering ${historicalData.length} candles, Price range: $${minPrice.toFixed(2)} - $${maxPrice.toFixed(2)}`);
+      const currentSymbol = symbolRef.current;
+      
+      console.log(`[Chart] Rendering ${historicalData.length} candles for ${currentSymbol}, Price range: $${minPrice.toFixed(2)} - $${maxPrice.toFixed(2)}`);
+      
+      // Validate data matches current symbol before rendering
+      const avgPrice = (minPrice + maxPrice) / 2;
+      if (currentSymbol.toUpperCase() === 'XAUUSD' && (avgPrice < 2000 || avgPrice > 8000)) {
+        console.warn(`[Chart] ⚠️ Price range $${minPrice.toFixed(0)}-$${maxPrice.toFixed(0)} doesn't match XAUUSD, skipping render`);
+        return;
+      }
+      if (currentSymbol.toUpperCase() === 'BTCUSDT' && avgPrice < 10000) {
+        console.warn(`[Chart] ⚠️ Price range doesn't match BTCUSDT, skipping render`);
+        return;
+      }
       
       // Set candlestick data
       const candleData = historicalData.map(d => ({
@@ -597,7 +690,13 @@ export function FullFeaturedChart({
         const { LineSeries } = lwc;
 
         structureLineSeriesRef.current.forEach(series => {
-          try { chartRef.current.removeSeries(series); } catch (e) {}
+          try {
+            if (chartRef.current && series) {
+              chartRef.current.removeSeries(series);
+            }
+          } catch (err) {
+            console.warn('[Chart] Failed to remove structure line series:', err);
+          }
         });
         structureLineSeriesRef.current = [];
 
@@ -901,9 +1000,17 @@ export function FullFeaturedChart({
                   onClick={reconnect}
                   className="px-4 py-2 bg-blue-500 text-white rounded-lg text-sm hover:bg-blue-600 transition"
                 >
-                  Try Again
+                  Reconnect
                 </button>
               </div>
+            </div>
+          )}
+
+          {/* Reconnecting Banner */}
+          {!error && connectionState === 'reconnecting' && (
+            <div className="absolute top-2 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 bg-yellow-500/15 border border-yellow-500/30 rounded-lg px-4 py-1.5 backdrop-blur-sm">
+              <div className="w-3 h-3 border-2 border-yellow-400 border-t-transparent rounded-full animate-spin" />
+              <span className="text-yellow-400 text-xs font-medium">Reconnecting… (attempt {retryCount})</span>
             </div>
           )}
 

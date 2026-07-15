@@ -7,6 +7,8 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { analyzeWithGemini, AIAnalysisRequest, AIAnalysisResponse } from '@/app/lib/geminiAI';
+import { checkRateLimit } from '@/app/lib/rateLimit';
+import { enforceApiKey, getClientIp } from '@/app/lib/apiSecurity';
 
 // Rate limiting - max 1 request per 60 seconds per symbol (to avoid quota exhaustion)
 const lastRequestTime: Record<string, number> = {};
@@ -14,6 +16,9 @@ const MIN_REQUEST_INTERVAL = 60000; // 60 seconds
 
 export async function POST(request: NextRequest) {
   try {
+    const apiKeyError = enforceApiKey(request, process.env.APP_API_KEY, 'x-app-api-key');
+    if (apiKeyError) return apiKeyError;
+
     const body = await request.json();
     
     // Validate required fields
@@ -45,6 +50,22 @@ export async function POST(request: NextRequest) {
     }
     
     lastRequestTime[symbol] = now;
+
+    const ip = getClientIp(request);
+    const rate = checkRateLimit(`ai:${ip}:${symbol.toUpperCase()}`, 2, 60000);
+    if (!rate.allowed) {
+      return NextResponse.json(
+        { error: 'Rate limited. Please wait before requesting again.', retryAfter: rate.retryAfterMs || 60000 },
+        { status: 429, headers: { 'Retry-After': String(Math.ceil((rate.retryAfterMs || 60000) / 1000)) } }
+      );
+    }
+
+    if (!process.env.GEMINI_API_KEY) {
+      return NextResponse.json(
+        { error: 'AI analysis is not configured' },
+        { status: 503 }
+      );
+    }
 
     // Prepare request for AI
     const analysisRequest: AIAnalysisRequest = {

@@ -17,16 +17,16 @@ interface MobileLayoutProps {
   price: number;
   priceDirection: 'up' | 'down' | 'neutral';
   timeframe: string;
-  onTimeframeChange: (tf: string) => void;
-  onSymbolChange: (symbol: string) => void;
+  onTimeframeChangeAction: (tf: string) => void;
+  onSymbolChangeAction: (symbol: string) => void;
   // Bot props
   botStatus?: 'running' | 'stopped' | 'error';
   botMode?: 'dry-run' | 'live';
-  onBotStart?: () => void;
-  onBotStop?: () => void;
-  onBotModeChange?: (mode: 'dry-run' | 'live') => void;
+  onBotStartAction?: () => void;
+  onBotStopAction?: () => void;
+  onBotModeChangeAction?: (mode: 'dry-run' | 'live') => void;
   aiEnabled?: boolean;
-  onAiToggle?: (enabled: boolean) => void;
+  onAiToggleAction?: (enabled: boolean) => void;
   // Signal props
   signal?: {
     type: 'BUY' | 'SELL' | 'HOLD';
@@ -57,15 +57,15 @@ export default function MobileLayout({
   price,
   priceDirection,
   timeframe,
-  onTimeframeChange,
-  onSymbolChange,
+  onTimeframeChangeAction,
+  onSymbolChangeAction,
   botStatus = 'stopped',
   botMode = 'dry-run',
-  onBotStart = () => {},
-  onBotStop = () => {},
-  onBotModeChange = () => {},
+  onBotStartAction = () => {},
+  onBotStopAction = () => {},
+  onBotModeChangeAction = () => {},
   aiEnabled = true,
-  onAiToggle = () => {},
+  onAiToggleAction = () => {},
   signal = null,
   sentimentData = {
     sentiment: 'NEUTRAL',
@@ -104,11 +104,11 @@ export default function MobileLayout({
           <MobileBotControl
             status={botStatus}
             mode={botMode}
-            onStart={onBotStart}
-            onStop={onBotStop}
-            onModeChange={onBotModeChange}
+            onStartAction={onBotStartAction}
+            onStopAction={onBotStopAction}
+            onModeChangeAction={onBotModeChangeAction}
             aiEnabled={aiEnabled}
-            onAiToggle={onAiToggle}
+            onAiToggleAction={onAiToggleAction}
           />
         );
       case 'signals':
@@ -147,8 +147,8 @@ export default function MobileLayout({
           price={price}
           priceDirection={priceDirection}
           timeframe={timeframe}
-          onTimeframeChange={onTimeframeChange}
-          onSymbolChange={onSymbolChange}
+          onTimeframeChangeAction={onTimeframeChangeAction}
+          onSymbolChangeAction={onSymbolChangeAction}
         />
       </div>
 
@@ -161,8 +161,8 @@ export default function MobileLayout({
       <BottomSheet
         isOpen={activePanel !== null && sheetHeight !== 'collapsed'}
         height={sheetHeight}
-        onHeightChange={setSheetHeight}
-        onClose={() => {
+        onHeightChangeAction={setSheetHeight}
+        onCloseAction={() => {
           setActivePanel(null);
           setSheetHeight('collapsed');
         }}
@@ -175,7 +175,7 @@ export default function MobileLayout({
       <div className="fixed bottom-0 left-0 right-0 z-50">
         <MobileNav
           activeTab={activePanel || 'chart'}
-          onTabChange={handleNavClick}
+          onTabChangeAction={handleNavClick}
         />
       </div>
     </div>

@@ -95,6 +95,23 @@ Buka `http://localhost:3000/bot` untuk dashboard
 ```env
 NEXT_PUBLIC_BOT_API_URL=http://localhost:8000
 NEXT_PUBLIC_BOT_WS_URL=ws://localhost:8000/ws
+
+# Mandatory API protection (frontend -> Next.js API)
+NEXT_PUBLIC_APP_API_KEY=change-me
+APP_API_KEY=change-me
+
+# Next.js -> Python bot backend
+BOT_API_URL=http://localhost:8000
+BOT_API_KEY=change-me
+```
+
+### Python Backend Environment (`backend/.env`)
+
+```env
+BOT_API_KEY=change-me
+EXCHANGE_API_KEY=your-exchange-key
+EXCHANGE_API_SECRET=your-exchange-secret
+EXCHANGE_SANDBOX=true
 ```
 
 ### Bot Config (di Dashboard)

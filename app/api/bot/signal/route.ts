@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { adjustSignalConfidence, isMarketConditionFavorable, getMarketAnalysis } from '@/app/lib/kolAPI';
+import { checkRateLimit } from '@/app/lib/rateLimit';
+import { enforceApiKey, getClientIp } from '@/app/lib/apiSecurity';
 
 /**
  * AI Trading Decision Engine - Signal Generator API
@@ -334,6 +336,19 @@ function getDecimals(price: number): number {
 // POST handler - generate signal from provided candles
 export async function POST(request: NextRequest) {
   try {
+    const apiKeyError = enforceApiKey(request, process.env.APP_API_KEY, 'x-app-api-key');
+    if (apiKeyError) return apiKeyError;
+
+    const ip = getClientIp(request);
+    const limit = process.env.NODE_ENV === 'development' ? 60 : 10;
+    const rate = checkRateLimit(`bot:signal:${ip}`, limit, 60000);
+    if (!rate.allowed) {
+      return NextResponse.json(
+        { error: 'Rate limit exceeded', retryAfter: rate.retryAfterMs || 60000 },
+        { status: 429, headers: { 'Retry-After': String(Math.ceil((rate.retryAfterMs || 60000) / 1000)) } }
+      );
+    }
+
     const body = await request.json();
     const {
       candles,

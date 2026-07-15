@@ -4,7 +4,9 @@
  * FALLBACK: Uses realistic mock data when API is unavailable
  */
 
-const KOL_API_KEY = 'kol_demo_key';
+import 'server-only';
+
+const KOL_API_KEY = process.env.KOL_API_KEY || '';
 const KOL_API_BASE = 'https://api.kolhub.io/v1';
 
 // API availability flag
@@ -163,6 +165,12 @@ function generateMockOnChainMetrics(symbol: string): OnChainMetrics {
 // API Functions with Mock Fallback
 export async function getMarketSentiment(symbol: string): Promise<MarketSentiment> {
   const now = Date.now();
+
+  if (!KOL_API_KEY) {
+    apiAvailable = false;
+    lastApiCheck = now;
+    return generateMockSentiment(symbol);
+  }
   
   if (!apiAvailable && (now - lastApiCheck) < API_CHECK_INTERVAL) {
     return generateMockSentiment(symbol);
@@ -214,6 +222,12 @@ export async function getMarketSentiment(symbol: string): Promise<MarketSentimen
 
 export async function getOnChainMetrics(symbol: string): Promise<OnChainMetrics> {
   const now = Date.now();
+
+  if (!KOL_API_KEY) {
+    apiAvailable = false;
+    lastApiCheck = now;
+    return generateMockOnChainMetrics(symbol);
+  }
   
   if (!apiAvailable && (now - lastApiCheck) < API_CHECK_INTERVAL) {
     return generateMockOnChainMetrics(symbol);
@@ -260,6 +274,12 @@ export async function getOnChainMetrics(symbol: string): Promise<OnChainMetrics>
 
 export async function getTrendAnalysis(symbol: string): Promise<TrendAnalysis> {
   const now = Date.now();
+
+  if (!KOL_API_KEY) {
+    apiAvailable = false;
+    lastApiCheck = now;
+    return generateMockTrend(symbol);
+  }
   
   if (!apiAvailable && (now - lastApiCheck) < API_CHECK_INTERVAL) {
     return generateMockTrend(symbol);

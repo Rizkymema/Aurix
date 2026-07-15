@@ -1,4 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { checkRateLimit } from '@/app/lib/rateLimit';
+import { enforceApiKey, getClientIp } from '@/app/lib/apiSecurity';
+import { validateForexExecutionReadiness } from '@/app/lib/forexExecutionGuard';
 
 /**
  * POST /api/bot/execute
@@ -32,6 +35,18 @@ const executedTrades = new Map<string, number>();
 
 export async function POST(request: NextRequest) {
   try {
+    const apiKeyError = enforceApiKey(request, process.env.APP_API_KEY, 'x-app-api-key');
+    if (apiKeyError) return apiKeyError;
+
+    const ip = getClientIp(request);
+    const rate = checkRateLimit(`bot:execute:${ip}`, 10, 60000);
+    if (!rate.allowed) {
+      return NextResponse.json(
+        { error: 'Rate limit exceeded', retryAfter: rate.retryAfterMs || 60000 },
+        { status: 429, headers: { 'Retry-After': String(Math.ceil((rate.retryAfterMs || 60000) / 1000)) } }
+      );
+    }
+
     const body: ExecuteTradeRequest = await request.json();
     const { signal, currentPrice, symbol, timeframe, mode } = body;
 
@@ -45,7 +60,8 @@ export async function POST(request: NextRequest) {
 
     // Check for duplicate execution (within 60 seconds)
     const tradeKey = `${symbol}-${signal.signal}-${signal.entry}`;
-    const lastExecution = executedTrades.get(tradeKey);
+    const idempotencyKey = request.headers.get('Idempotency-Key') || tradeKey;
+    const lastExecution = executedTrades.get(idempotencyKey);
     if (lastExecution && Date.now() - lastExecution < 60000) {
       return NextResponse.json(
         { 
@@ -67,6 +83,24 @@ export async function POST(request: NextRequest) {
         },
         { status: 200 }
       );
+    }
+
+    if (mode === 'live') {
+      const feedGuard = await validateForexExecutionReadiness(symbol);
+      if (!feedGuard.allowed) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: 'Live trade blocked by feed guard',
+            reason: feedGuard.reason,
+            feedStatus: feedGuard.feedStatus,
+            source: feedGuard.source,
+            marketStatus: feedGuard.marketStatus,
+            traderMadeConfigured: feedGuard.traderMadeConfigured,
+          },
+          { status: 409 },
+        );
+      }
     }
 
     // Calculate position size (example: 1% risk)
@@ -91,6 +125,8 @@ export async function POST(request: NextRequest) {
       timeframe,
       timestamp: new Date().toISOString(),
       mode,
+      idempotency_key: idempotencyKey,
+      feed_guard: mode === 'live' ? 'passed' : 'not-required',
     };
 
     // Execute based on mode
@@ -100,13 +136,17 @@ export async function POST(request: NextRequest) {
         const BOT_API_URL = process.env.BOT_API_URL || 'http://localhost:8000';
         const response = await fetch(`${BOT_API_URL}/api/bot/execute`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'Idempotency-Key': idempotencyKey,
+            ...(process.env.BOT_API_KEY ? { 'x-bot-api-key': process.env.BOT_API_KEY } : {}),
+          },
           body: JSON.stringify(tradeOrder),
         });
 
         if (response.ok) {
           const result = await response.json();
-          executedTrades.set(tradeKey, Date.now());
+          executedTrades.set(idempotencyKey, Date.now());
           
           return NextResponse.json({
             success: true,
@@ -122,20 +162,17 @@ export async function POST(request: NextRequest) {
           });
         }
       } catch (err) {
-        // Bot backend not available, log but don't fail
         console.error('[Execute] Bot backend not available:', err);
-        executedTrades.set(tradeKey, Date.now());
-        
+
         return NextResponse.json({
-          success: true,
-          message: `LIVE trade logged (backend offline): ${signal.signal} ${symbol}`,
+          success: false,
+          message: 'Bot backend not connected',
           order: tradeOrder,
-          warning: 'Bot backend not connected',
-        });
+        }, { status: 503 });
       }
     } else {
       // DRY-RUN mode - simulate execution
-      executedTrades.set(tradeKey, Date.now());
+      executedTrades.set(idempotencyKey, Date.now());
       
       return NextResponse.json({
         success: true,

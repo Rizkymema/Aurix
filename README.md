@@ -9,6 +9,8 @@ Sebuah dashboard trading realtime built dengan Next.js + React + TypeScript yang
 - Dual AI analysis: technical engine + KOL sentiment (fallback mock)
 - Bot trading Python (FastAPI) untuk strategi, manajemen risiko, dan eksekusi (CCXT)
 - Fallback robust untuk API eksternal (Binance, Gold APIs, KOL) supaya UI tetap berfungsi saat API mati
+- Status feed transparan: `realtime`, `delayed`, `stale`, atau `unavailable`
+- Bridge MT5 lokal yang diautentikasi untuk harga XAUUSD/forex pada terminal MT5 Windows
 
 ## Arsitektur Singkat
 - Frontend: Next.js 15 (app router) + TypeScript + Tailwind CSS
@@ -49,16 +51,36 @@ python bot_api.py
 - `app/components/signal` — generator sinyal dan komponen UI
 - `app/api/binance/klines` — route fallback untuk klines/ohlc
 - `app/lib/kolAPI.ts` — integrasi KOL dengan fallback mock
+- `app/lib/mt5Bridge.ts` — klien bridge MT5 lokal/remote
+- `backend/mt5_bridge_server.py` — server bridge harga MT5 read-only
 - `bot/` — bot backend (strategy_engine.py, trade_executor.py, trading_bot.py, bot_api.py)
 
 ## Konfigurasi & Environment
-- Frontend: tambahkan variabel di `.env.local` bila perlu, contoh:
+- Frontend: tambahkan variabel di `.env.local` (wajib untuk API protection):
 
 ```
 NEXT_PUBLIC_BOT_API_URL=http://localhost:8000
+NEXT_PUBLIC_BOT_WS_URL=ws://localhost:8000/ws
+
+# Mandatory API protection (frontend -> Next.js API)
+NEXT_PUBLIC_APP_API_KEY=change-me
+APP_API_KEY=change-me
+
+# Next.js -> Python bot backend
+BOT_API_URL=http://localhost:8000
+BOT_API_KEY=change-me
+
+# External APIs (server-side only)
+GEMINI_API_KEY=your-gemini-key
+KOL_API_KEY=your-kol-key
+
+# Untuk harga MT5 pada dashboard Vercel (server-side only)
+MT5_BRIDGE_URL=https://your-mt5-bridge.example.com
+MT5_BRIDGE_TOKEN=long-random-secret
 ```
 
-- Bot (Python): konfigurasi API keys dan exchange credentials di `bot/.env` atau langsung ke `trade_executor.py` (ikuti README di folder `bot/`).
+- Bot (Python): konfigurasi API keys dan exchange credentials di `backend/.env` (lihat contoh di `backend/.env.example`).
+- Panduan bridge MT5: [`docs/MT5_BRIDGE.md`](docs/MT5_BRIDGE.md). Vercel tidak dapat mengakses terminal MT5 di laptop secara langsung; bridge HTTPS diperlukan untuk harga MT5 di deployment.
 
 ## Debugging & Tips
 - Chart tidak update? cek konsol browser untuk log `useWebSocket` dan pastikan endpoint fallback tersedia.
@@ -71,6 +93,14 @@ NEXT_PUBLIC_BOT_API_URL=http://localhost:8000
 npm run lint
 npm run build
 ```
+
+## Deploy Vercel
+
+```bash
+npx vercel --prod
+```
+
+Set `APP_API_KEY`, `BOT_API_KEY`, `MT5_BRIDGE_URL`, dan `MT5_BRIDGE_TOKEN` di Vercel. Jangan menggunakan nilai `change-me`, dan jangan menaruh nilai rahasia pada variabel yang diawali `NEXT_PUBLIC_`.
 
 ## Kontribusi
 - Fork repo → buat branch fitur → buka pull request. Sertakan deskripsi singkat dan screenshot bila ada perubahan UI.

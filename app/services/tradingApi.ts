@@ -8,6 +8,7 @@
 // Note: Using 'any' for API responses as data structure comes from Python backend
 
 const API_BASE = '/api';
+const APP_API_KEY = process.env.NEXT_PUBLIC_APP_API_KEY;
 
 // Types
 export interface ApiResponse<T> {
@@ -82,6 +83,7 @@ async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<Api
       ...options,
       headers: {
         'Content-Type': 'application/json',
+        ...(APP_API_KEY ? { 'x-app-api-key': APP_API_KEY } : {}),
         ...options?.headers,
       },
     });

@@ -9,6 +9,26 @@ import {
   detectZones,
   calculateATR,
 } from './signalGenerator';
+import {
+  generateUnifiedSignal,
+  UnifiedSignal,
+  SignalGeneratorConfig,
+  DEFAULT_CONFIG,
+  PriceZone,
+  // Institutional engine
+  generateInstitutionalSignal,
+  InstitutionalOutput,
+  InstitutionalSignalConfig,
+  DEFAULT_INSTITUTIONAL_CONFIG,
+  DisciplineState,
+  createDisciplineState,
+  recordTradeResult,
+  tickCooldown,
+  MonetisationTier,
+} from '../../lib/unifiedSignalGenerator';
+import { CandleData } from '../../lib/tradingRulesEngine';
+
+const APP_API_KEY = process.env.NEXT_PUBLIC_APP_API_KEY;
 
 interface AIAnalysisResponse {
   signal: 'BUY' | 'SELL' | 'WAIT';
@@ -57,6 +77,8 @@ interface UseSmartSignalOptions {
     time: number;
   }>;
   enabled?: boolean;
+  // NEW: 3-Layer configuration
+  layerConfig?: Partial<SignalGeneratorConfig>;
 }
 
 interface UseSmartSignalReturn {
@@ -64,13 +86,36 @@ interface UseSmartSignalReturn {
   aiResponse: AIAnalysisResponse | null;
   isLoading: boolean;
   error: string | null;
-  source: 'ai' | 'local' | null;
+  source: 'ai' | 'local' | 'unified' | 'institutional' | null;
   refresh: () => void;
-  // New: AI toggle controls
+  // AI toggle controls
   aiEnabled: boolean;
   setAiEnabled: (enabled: boolean) => void;
   autoRefreshEnabled: boolean;
   setAutoRefreshEnabled: (enabled: boolean) => void;
+  // 3-Layer unified signal
+  unifiedSignal: UnifiedSignal | null;
+  layerBreakdown: {
+    layer1: number;
+    layer2: number;
+    layer3: boolean;
+  } | null;
+  // Layer controls
+  sentimentEnabled: boolean;
+  setSentimentEnabled: (enabled: boolean) => void;
+  geminiEnabled: boolean;
+  setGeminiEnabled: (enabled: boolean) => void;
+  // Generate unified signal function
+  generateUnified: () => Promise<void>;
+  // INSTITUTIONAL ENGINE
+  institutionalSignal: InstitutionalOutput | null;
+  institutionalEnabled: boolean;
+  setInstitutionalEnabled: (enabled: boolean) => void;
+  discipline: DisciplineState;
+  tier: MonetisationTier;
+  setTier: (tier: MonetisationTier) => void;
+  generateInstitutional: () => Promise<void>;
+  recordResult: (won: boolean) => void;
 }
 
 export function useSmartSignal({
@@ -81,12 +126,13 @@ export function useSmartSignal({
   zones,
   patterns,
   enabled = true,
+  layerConfig,
 }: UseSmartSignalOptions): UseSmartSignalReturn {
   const [signal, setSignal] = useState<SmartSignal | null>(null);
   const [aiResponse, setAiResponse] = useState<AIAnalysisResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [source, setSource] = useState<'ai' | 'local' | null>(null);
+  const [source, setSource] = useState<'ai' | 'local' | 'unified' | 'institutional' | null>(null);
   const lastCandleTimeRef = useRef<number>(0);
   const lastAnalysisRef = useRef<number>(0);
   
@@ -94,9 +140,221 @@ export function useSmartSignal({
   const [aiEnabled, setAiEnabled] = useState(false);
   const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(false);
   
+  // 3-Layer controls
+  const [sentimentEnabled, setSentimentEnabled] = useState(true);  // Layer 2 ON by default
+  const [geminiEnabled, setGeminiEnabled] = useState(false);       // Layer 3 OFF by default
+  const [unifiedSignal, setUnifiedSignal] = useState<UnifiedSignal | null>(null);
+  const [layerBreakdown, setLayerBreakdown] = useState<{
+    layer1: number;
+    layer2: number;
+    layer3: boolean;
+  } | null>(null);
+
+  // INSTITUTIONAL ENGINE state
+  const [institutionalEnabled, setInstitutionalEnabled] = useState(true); // ON by default
+  const [institutionalSignal, setInstitutionalSignal] = useState<InstitutionalOutput | null>(null);
+  const [discipline, setDiscipline] = useState<DisciplineState>(createDisciplineState());
+  const [tier, setTier] = useState<MonetisationTier>('PRO');
+  
   // Rate limit tracking (must match server-side: 60s per symbol)
   const MIN_AI_INTERVAL = 65000; // 65s (slightly more than server's 60s to be safe)
   const rateLimitedUntilRef = useRef<number>(0);
+
+  // NEW: Convert zones to PriceZone format for unified generator
+  const convertZonesToPriceZones = useCallback((): PriceZone[] => {
+    if (!zones) return [];
+    
+    return zones.map((z, index) => ({
+      id: `zone-${index}-${z.type}`,
+      type: z.type,
+      high: z.top,
+      low: z.bottom,
+      strength: z.strength,
+      created_at: Date.now() - (index * 3600000), // Approximate age
+      status: z.status as 'fresh' | 'tested' | 'broken'
+    }));
+  }, [zones]);
+
+  // NEW: Convert candles to CandleData format
+  const convertCandles = useCallback((): CandleData[] => {
+    return candles.map(c => ({
+      time: typeof c.time === 'number' ? c.time : new Date(c.time).getTime() / 1000,
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+      volume: c.volume
+    }));
+  }, [candles]);
+
+  // NEW: Generate unified 3-layer signal
+  const generateUnified = useCallback(async (): Promise<void> => {
+    if (candles.length < 50) {
+      setUnifiedSignal(null);
+      return;
+    }
+
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const priceZones = convertZonesToPriceZones();
+      const candleData = convertCandles();
+      
+      const config: SignalGeneratorConfig = {
+        ...DEFAULT_CONFIG,
+        enableLayer2: sentimentEnabled,
+        enableLayer3: geminiEnabled,
+        ...layerConfig
+      };
+
+      console.log(`[useSmartSignal] Generating unified signal with config:`, {
+        layer2: sentimentEnabled,
+        layer3: geminiEnabled
+      });
+
+      const unified = await generateUnifiedSignal(
+        candleData,
+        priceZones,
+        symbol,
+        timeframe,
+        config
+      );
+
+      if (unified) {
+        setUnifiedSignal(unified);
+        setLayerBreakdown({
+          layer1: unified.layer_breakdown.layer1_technical,
+          layer2: unified.layer_breakdown.layer2_sentiment,
+          layer3: unified.layer_breakdown.layer3_ai > 0
+        });
+        setSource('unified');
+
+        // Also set the legacy SmartSignal format for compatibility
+        const legacySignal: SmartSignal = {
+          type: unified.signal_type,
+          symbol: unified.symbol,
+          entry_zone: {
+            high: unified.entry * 1.002,
+            low: unified.entry * 0.998,
+          },
+          tp1: unified.take_profit_1,
+          tp2: unified.take_profit_2,
+          sl: unified.stop_loss,
+          reason: unified.reasons_list.join(' | '),
+          validity_score: unified.final_confidence,
+          timestamp: unified.timestamp,
+          risk_reward_ratio: unified.take_profit_1 && unified.stop_loss 
+            ? Math.abs(unified.take_profit_1 - unified.entry) / Math.abs(unified.entry - unified.stop_loss)
+            : 2,
+          trend_alignment: unified.validations.trend_alignment,
+          zone_confluence: unified.validations.zone_proximity,
+        };
+        setSignal(legacySignal);
+
+        console.log(`[useSmartSignal] Unified signal: ${unified.signal_type} @ ${unified.entry} | Grade: ${unified.quality_grade} | Rec: ${unified.recommendation}`);
+      } else {
+        setUnifiedSignal(null);
+        setSignal(null);
+        console.log(`[useSmartSignal] No valid unified signal at this time`);
+      }
+    } catch (err) {
+      console.error('[useSmartSignal] Unified signal error:', err);
+      setError(err instanceof Error ? err.message : 'Failed to generate unified signal');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [candles, symbol, timeframe, sentimentEnabled, geminiEnabled, layerConfig, convertZonesToPriceZones, convertCandles]);
+
+  // INSTITUTIONAL: Generate institutional-grade signal
+  const generateInstitutional = useCallback(async (): Promise<void> => {
+    if (candles.length < 200) {
+      console.log('[Institutional] Need 200+ candles, got', candles.length);
+      setInstitutionalSignal(null);
+      return;
+    }
+
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const priceZones = convertZonesToPriceZones();
+      const candleData = convertCandles();
+
+      const config: InstitutionalSignalConfig = {
+        ...DEFAULT_INSTITUTIONAL_CONFIG,
+        tier,
+        enableSentiment: sentimentEnabled,
+        enableAIValidation: false, // AI validation done separately
+      };
+
+      console.log(`[Institutional] Running 11-step engine for ${symbol} ${timeframe}...`);
+
+      const output = await generateInstitutionalSignal(
+        candleData,
+        priceZones,
+        symbol,
+        timeframe,
+        discipline,
+        config,
+        [], // news events - empty for now
+        null, // AI validation handled externally
+      );
+
+      setInstitutionalSignal(output);
+      setSource('institutional');
+
+      // Tick cooldown on each analysis (approximation of candle close)
+      if (discipline.cooldown_active) {
+        setDiscipline(prev => tickCooldown(prev));
+      }
+
+      // If TRADE, also set legacy signal for compatibility
+      if (output.decision === 'TRADE' && output.entry !== null) {
+        const legacySignal: SmartSignal = {
+          type: output.direction as 'BUY' | 'SELL',
+          symbol,
+          entry_zone: {
+            high: output.entry * 1.002,
+            low: output.entry * 0.998,
+          },
+          tp1: output.take_profit[0] || output.entry,
+          tp2: output.take_profit[1] || output.entry,
+          sl: output.stop_loss || output.entry,
+          reason: output.reason.join(' | '),
+          validity_score: output.confidence,
+          timestamp: Date.now(),
+          risk_reward_ratio: output.stop_loss && output.take_profit[0]
+            ? Math.abs(output.take_profit[0] - output.entry) / Math.abs(output.entry - output.stop_loss)
+            : 2,
+          trend_alignment: output.step_results.find(s => s.step === 2)?.passed || false,
+          zone_confluence: output.step_results.find(s => s.step === 4)?.passed || false,
+        };
+        setSignal(legacySignal);
+      } else {
+        setSignal(null);
+      }
+
+      console.log(`[Institutional] Result: ${output.decision} | Grade: ${output.grade} | Score: ${output.score_breakdown.total}/100`);
+    } catch (err) {
+      console.error('[Institutional] Engine error:', err);
+      setError(err instanceof Error ? err.message : 'Institutional engine failed');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [candles, symbol, timeframe, discipline, tier, sentimentEnabled, convertZonesToPriceZones, convertCandles]);
+
+  // INSTITUTIONAL: Record trade result for discipline tracking
+  const recordResult = useCallback((won: boolean) => {
+    if (!institutionalSignal) return;
+    // Approximate candle duration from timeframe
+    const tfMs: Record<string, number> = {
+      '1m': 60000, '5m': 300000, '15m': 900000, '30m': 1800000,
+      '1h': 3600000, '4h': 14400000, '1d': 86400000,
+    };
+    const candleDuration = tfMs[timeframe] || 3600000;
+    setDiscipline(prev => recordTradeResult(prev, won, institutionalSignal.grade, candleDuration));
+  }, [institutionalSignal, timeframe]);
 
   // Local signal generation (fallback)
   const generateLocalSignal = useCallback((): SmartSignal | null => {
@@ -155,7 +413,10 @@ export function useSmartSignal({
     try {
       const response = await fetch('/api/ai/analyze', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(APP_API_KEY ? { 'x-app-api-key': APP_API_KEY } : {}),
+        },
         body: JSON.stringify({
           symbol,
           timeframe,
@@ -348,6 +609,22 @@ export function useSmartSignal({
     generateSignal(true);
   }, [generateSignal]);
 
+  // Generate unified signal on initial load and when layer settings change
+  useEffect(() => {
+    if (enabled && candles.length >= 50 && !isLoading && !institutionalEnabled) {
+      generateUnified();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, sentimentEnabled, geminiEnabled, institutionalEnabled]);
+
+  // INSTITUTIONAL: Auto-generate when enabled and candles available
+  useEffect(() => {
+    if (enabled && institutionalEnabled && candles.length >= 200 && !isLoading) {
+      generateInstitutional();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, institutionalEnabled, tier]);
+
   return {
     signal,
     aiResponse,
@@ -360,5 +637,159 @@ export function useSmartSignal({
     setAiEnabled,
     autoRefreshEnabled,
     setAutoRefreshEnabled,
+    // 3-Layer unified signal
+    unifiedSignal,
+    layerBreakdown,
+    // Layer controls
+    sentimentEnabled,
+    setSentimentEnabled,
+    geminiEnabled,
+    setGeminiEnabled,
+    // Generate unified signal function
+    generateUnified,
+    // INSTITUTIONAL ENGINE
+    institutionalSignal,
+    institutionalEnabled,
+    setInstitutionalEnabled,
+    discipline,
+    tier,
+    setTier,
+    generateInstitutional,
+    recordResult,
+  };
+}
+
+// ==================== HELPER HOOKS ====================
+
+/**
+ * Hook for unified signal quality assessment
+ */
+export function useSignalQuality(signal: UnifiedSignal | null) {
+  if (!signal) {
+    return {
+      isGood: false,
+      isExecutable: false,
+      warningCount: 0,
+      warnings: [] as string[],
+      strengthLabel: 'No Signal',
+      gradeColor: 'gray'
+    };
+  }
+  
+  const warnings: string[] = [];
+  
+  // Check validations
+  if (!signal.validations.trend_alignment) {
+    warnings.push('Trend tidak align dengan signal');
+  }
+  if (!signal.validations.zone_proximity) {
+    warnings.push('Tidak ada konfirmasi zone');
+  }
+  if (!signal.validations.ema_order_valid) {
+    warnings.push('EMA order tidak ideal');
+  }
+  if (signal.market_validation === 'CONFLICTING') {
+    warnings.push('Sentiment berlawanan dengan signal');
+  }
+  
+  // Determine strength label
+  let strengthLabel: string;
+  let gradeColor: string;
+  
+  switch (signal.quality_grade) {
+    case 'A':
+      strengthLabel = 'Sangat Kuat';
+      gradeColor = 'emerald';
+      break;
+    case 'B':
+      strengthLabel = 'Kuat';
+      gradeColor = 'green';
+      break;
+    case 'C':
+      strengthLabel = 'Moderat';
+      gradeColor = 'yellow';
+      break;
+    case 'D':
+      strengthLabel = 'Lemah';
+      gradeColor = 'orange';
+      break;
+    default:
+      strengthLabel = 'Sangat Lemah';
+      gradeColor = 'red';
+  }
+  
+  return {
+    isGood: ['A', 'B', 'C'].includes(signal.quality_grade),
+    isExecutable: signal.recommendation === 'EXECUTE',
+    warningCount: warnings.length,
+    warnings,
+    strengthLabel,
+    gradeColor
+  };
+}
+
+/**
+ * Hook for institutional signal quality assessment
+ */
+export function useInstitutionalQuality(signal: InstitutionalOutput | null) {
+  if (!signal) {
+    return {
+      isGood: false,
+      isTradeable: false,
+      warningCount: 0,
+      warnings: [] as string[],
+      strengthLabel: 'No Signal',
+      gradeColor: 'gray',
+      gradeBg: 'bg-gray-500/10 border-gray-500/30',
+    };
+  }
+
+  const warnings: string[] = [];
+  const failedSteps = signal.step_results.filter(s => !s.passed);
+  for (const step of failedSteps) {
+    warnings.push(`Step ${step.step} (${step.name}): ${step.reason}`);
+  }
+
+  if (signal.cooldown) {
+    warnings.push(`Cooldown: ${signal.discipline.cooldown_reason}`);
+  }
+  if (!signal.tier_filter.allowed) {
+    warnings.push(`Tier blocked: ${signal.tier_filter.reason}`);
+  }
+
+  let strengthLabel: string;
+  let gradeColor: string;
+  let gradeBg: string;
+
+  switch (signal.grade) {
+    case 'A+':
+      strengthLabel = 'Institutional Grade';
+      gradeColor = 'amber';
+      gradeBg = 'bg-amber-500/10 border-amber-500/30';
+      break;
+    case 'A':
+      strengthLabel = 'High Probability';
+      gradeColor = 'emerald';
+      gradeBg = 'bg-emerald-500/10 border-emerald-500/30';
+      break;
+    case 'B':
+      strengthLabel = 'Good Setup';
+      gradeColor = 'blue';
+      gradeBg = 'bg-blue-500/10 border-blue-500/30';
+      break;
+    default:
+      strengthLabel = 'No Trade';
+      gradeColor = 'red';
+      gradeBg = 'bg-red-500/10 border-red-500/30';
+  }
+
+  return {
+    isGood: signal.grade !== 'NO_TRADE',
+    isTradeable: signal.decision === 'TRADE',
+    warningCount: warnings.length,
+    warnings,
+    strengthLabel,
+    gradeColor,
+    gradeBg,
   };
 }

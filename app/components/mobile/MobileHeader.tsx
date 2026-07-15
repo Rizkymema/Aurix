@@ -7,8 +7,8 @@ interface MobileHeaderProps {
   price: number;
   priceDirection: 'up' | 'down' | 'neutral';
   timeframe: string;
-  onTimeframeChange: (tf: string) => void;
-  onSymbolChange: (symbol: string) => void;
+  onTimeframeChangeAction: (tf: string) => void;
+  onSymbolChangeAction: (symbol: string) => void;
 }
 
 const TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '1d'];
@@ -19,8 +19,8 @@ export default function MobileHeader({
   price,
   priceDirection,
   timeframe,
-  onTimeframeChange,
-  onSymbolChange
+  onTimeframeChangeAction,
+  onSymbolChangeAction
 }: MobileHeaderProps) {
   const [showSymbolPicker, setShowSymbolPicker] = useState(false);
   const [flash, setFlash] = useState(false);
@@ -73,7 +73,7 @@ export default function MobileHeader({
         {TIMEFRAMES.map((tf) => (
           <button
             key={tf}
-            onClick={() => onTimeframeChange(tf)}
+            onClick={() => onTimeframeChangeAction(tf)}
             className={`flex-shrink-0 px-3 py-1.5 rounded-md text-sm font-medium 
                        min-h-[36px] min-w-[44px] transition-colors
                        ${timeframe === tf
@@ -99,7 +99,7 @@ export default function MobileHeader({
               <button
                 key={s}
                 onClick={() => {
-                  onSymbolChange(s);
+                  onSymbolChangeAction(s);
                   setShowSymbolPicker(false);
                 }}
                 className={`w-full px-4 py-3 text-left min-h-[48px] transition-colors

@@ -5,7 +5,9 @@
  * AI HANYA menganalisis data yang dikirim dari frontend (chart realtime).
  */
 
-const GEMINI_API_KEY = 'AIzaSyDtuKH8iGAnRE-cXr1d5xbgn6vEyX8hOCA';
+import 'server-only';
+
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 // Using gemini-2.0-flash-exp model (confirmed working, has free tier)
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent';
 
@@ -278,6 +280,10 @@ function calculateSimpleATR(candles: CandleData[], period: number = 14): number 
  * Call Gemini AI API
  */
 export async function analyzeWithGemini(data: AIAnalysisRequest): Promise<AIAnalysisResponse> {
+  if (!GEMINI_API_KEY) {
+    throw new Error('GEMINI_API_KEY is not configured');
+  }
+
   const prompt = buildAnalysisPrompt(data);
 
   try {

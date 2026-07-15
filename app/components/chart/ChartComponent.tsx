@@ -39,6 +39,9 @@ export function ChartComponent({
   const [isChartReady, setIsChartReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const historicalDataRef = useRef<CandlestickData[]>([]);
+  const lastCandleTimeRef = useRef<number | null>(null);
+
   // Handle incoming real-time data
   const handleRealtimeData = useCallback((data: CandlestickData) => {
     if (candlestickSeriesRef.current && volumeSeriesRef.current && isChartReady) {
@@ -60,6 +63,21 @@ export function ChartComponent({
         });
 
         setCurrentPrice(data.close);
+
+        // Avoid full state updates on every tick; only update when candle closes.
+        const lastTime = lastCandleTimeRef.current;
+        const refData = historicalDataRef.current;
+        if (lastTime === null) {
+          historicalDataRef.current = [data];
+          lastCandleTimeRef.current = data.time;
+          setHistoricalData([data]);
+        } else if (data.time > lastTime) {
+          historicalDataRef.current = [...refData, data].slice(-1000);
+          lastCandleTimeRef.current = data.time;
+          setHistoricalData(historicalDataRef.current);
+        } else if (data.time === lastTime && refData.length > 0) {
+          refData[refData.length - 1] = data;
+        }
         
         // Forward to parent component
         onRealtimeUpdate?.(data);
@@ -71,7 +89,11 @@ export function ChartComponent({
 
   // Handle historical data
   const handleHistoricalData = useCallback((data: CandlestickData[]) => {
-    setHistoricalData(data);
+    historicalDataRef.current = data.slice(-1000);
+    lastCandleTimeRef.current = historicalDataRef.current.length > 0
+      ? historicalDataRef.current[historicalDataRef.current.length - 1].time
+      : null;
+    setHistoricalData(historicalDataRef.current);
 
     if (data.length > 0) {
       const firstPrice = data[0].close;
@@ -86,11 +108,11 @@ export function ChartComponent({
   }, [onHistoricalData]);
 
   // WebSocket hook
-  const { isConnected, reconnect } = useWebSocket({
+  const { isConnected, connectionState, reconnect, retryCount } = useWebSocket({
     symbol,
     timeframe,
-    onMessage: handleRealtimeData,
-    onHistoricalData: handleHistoricalData,
+    onMessageAction: handleRealtimeData,
+    onHistoricalDataAction: handleHistoricalData,
   });
 
   // Initialize chart
@@ -150,6 +172,11 @@ export function ChartComponent({
               top: 0.1,
               bottom: 0.2,
             },
+          },
+          localization: {
+            // CRITICAL: Prevent local timezone conversion — all timestamps are UTC
+            locale: 'en-US',
+            dateFormat: 'yyyy-MM-dd',
           },
           timeScale: {
             borderColor: CHART_COLORS.border,
@@ -303,9 +330,17 @@ export function ChartComponent({
                 onClick={reconnect}
                 className="px-4 py-2 bg-blue-500 text-white rounded-lg text-sm hover:bg-blue-600 transition"
               >
-                Try Again
+                Reconnect
               </button>
             </div>
+          </div>
+        )}
+
+        {/* Reconnecting Overlay */}
+        {!error && connectionState === 'reconnecting' && (
+          <div className="absolute top-2 right-2 z-20 flex items-center gap-2 bg-yellow-500/20 border border-yellow-500/40 rounded-lg px-3 py-1.5">
+            <div className="w-3 h-3 border-2 border-yellow-400 border-t-transparent rounded-full animate-spin" />
+            <span className="text-yellow-400 text-xs">Reconnecting… (attempt {retryCount})</span>
           </div>
         )}
 

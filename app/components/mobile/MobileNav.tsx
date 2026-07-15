@@ -6,7 +6,7 @@ type TabType = 'chart' | 'signals' | 'bot' | 'settings';
 
 interface MobileNavProps {
   activeTab: TabType;
-  onTabChange: (tab: TabType) => void;
+  onTabChangeAction: (tab: TabType) => void;
 }
 
 const TABS: { id: TabType; label: string; icon: React.ReactNode }[] = [
@@ -54,14 +54,14 @@ const TABS: { id: TabType; label: string; icon: React.ReactNode }[] = [
   }
 ];
 
-export default function MobileNav({ activeTab, onTabChange }: MobileNavProps) {
+export default function MobileNav({ activeTab, onTabChangeAction }: MobileNavProps) {
   return (
     <nav className="bg-[#161B22] border-t border-[#21262D] 
                     flex items-center justify-around h-14 pb-safe">
       {TABS.map((tab) => (
         <button
           key={tab.id}
-          onClick={() => onTabChange(tab.id)}
+          onClick={() => onTabChangeAction(tab.id)}
           className={`flex flex-col items-center justify-center 
                      min-w-[64px] min-h-[48px] rounded-lg transition-colors
                      ${activeTab === tab.id 

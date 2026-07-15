@@ -58,14 +58,15 @@ class BotConfig:
     ema_fast: int = 9
     ema_medium: int = 21
     ema_slow: int = 200
-    min_confidence: float = 60.0
-    min_rrr: float = 1.5
+    min_confidence: float = 70.0
+    min_rrr: float = 2.0
+    institutional_mode: bool = True
     
     # Risk params
     equity: float = 10000.0
     leverage: int = 100
     risk_percent: float = 1.0
-    max_risk_percent: float = 2.0
+    max_risk_percent: float = 1.0
     
     # Execution
     exchange: str = "binance"
@@ -256,6 +257,7 @@ class TradingBot:
         self.open_positions: List[TradeRecord] = []
         self.current_signal: Optional[TradeSignal] = None
         self.last_analysis: Optional[Dict[str, Any]] = None
+        self.last_institutional: Optional[Dict[str, Any]] = None
         
         # Stats
         self.stats = {
@@ -265,7 +267,9 @@ class TradingBot:
             'losing_trades': 0,
             'total_pnl': 0.0,
             'started_at': None,
-            'last_signal_at': None
+            'last_signal_at': None,
+            'institutional_signals': 0,
+            'institutional_trades': 0,
         }
         
         self._log('INFO', f"TradingBot initialized - {'DRY RUN' if config.dry_run else 'LIVE'} mode")
@@ -318,9 +322,11 @@ class TradingBot:
                 ema_medium=self.config.ema_medium,
                 ema_slow=self.config.ema_slow,
                 min_rrr=self.config.min_rrr,
-                min_confidence=self.config.min_confidence
+                min_confidence=self.config.min_confidence,
+                institutional_mode=self.config.institutional_mode
             )
-            self._log('INFO', '✅ Strategy Engine initialized')
+            mode_label = '11-step institutional' if self.strategy.institutional_mode else 'legacy EMA'
+            self._log('INFO', f'✅ Strategy Engine initialized ({mode_label})')
             
             # Initialize Risk Manager
             self.risk_manager = RiskManager(
@@ -396,7 +402,7 @@ class TradingBot:
             await self.executor.shutdown()
     
     async def _analysis_cycle(self):
-        """Single analysis cycle"""
+        """Single analysis cycle (institutional or legacy)"""
         self._set_state(BotState.ANALYZING)
         
         # 1. Fetch data
@@ -417,20 +423,163 @@ class TradingBot:
         
         self._log('INFO', f'📈 Market: {market_state.get("trend")} | Price: {market_state.get("current_price")}', market_state)
         
-        # 3. Check for signal
-        signal = self.strategy.get_signal(ohlcv)
+        # Tick discipline cooldown on each analysis cycle
+        self.strategy.tick_discipline()
         
-        if signal:
+        # 3. Get signal (institutional or legacy)
+        result = self.strategy.get_signal_with_institutional(ohlcv)
+        self.last_institutional = result
+        
+        if result.get('decision') == 'TRADE':
+            grade = result.get('grade', '?')
+            source = result.get('source', 'unknown')
             self.stats['total_signals'] += 1
             self.stats['last_signal_at'] = datetime.now().isoformat()
-            self.current_signal = signal
             
-            self._log('INFO', f'🎯 SIGNAL DETECTED: {signal.action} @ {signal.entry_price}', signal.to_dict())
+            if source == 'institutional':
+                self.stats['institutional_signals'] += 1
+                self._log('INFO',
+                    f'🎯 INSTITUTIONAL SIGNAL: {result["direction"]} '
+                    f'Grade {grade} (confidence {result.get("confidence", 0)}/100)',
+                    result
+                )
+            else:
+                self._log('INFO',
+                    f'🎯 LEGACY SIGNAL: {result.get("direction", result.get("action"))} '
+                    f'@ {result.get("entry", result.get("entry_price"))}',
+                    result
+                )
             
             # 4. Execute if conditions met
-            await self._execute_signal(signal)
+            await self._execute_institutional_signal(result)
         else:
-            self._log('INFO', '⏸️ No valid signal - waiting...')
+            reasons = result.get('reason', ['No valid setup'])
+            disc = self.strategy.discipline_state
+            cooldown_msg = ''
+            if disc and disc.get('cooldown_active'):
+                cooldown_msg = f' | 🛑 {disc["cooldown_reason"]}'
+            self._log('INFO', f'⏸️ NO TRADE: {", ".join(reasons)}{cooldown_msg}')
+    
+    async def _execute_institutional_signal(self, signal_result: Dict[str, Any]):
+        """Execute trade from institutional or legacy signal result."""
+        # Check max positions
+        if len(self.open_positions) >= self.config.max_open_positions:
+            self._log('WARNING', f'Max positions reached ({self.config.max_open_positions}). Skipping signal.')
+            return
+        
+        self._set_state(BotState.TRADING)
+        
+        # Normalize signal fields
+        direction = signal_result.get('direction', signal_result.get('action'))
+        entry = signal_result.get('entry', signal_result.get('entry_price'))
+        sl = signal_result.get('stop_loss', signal_result.get('sl'))
+        grade = signal_result.get('grade', 'B')
+        
+        # Take profit — institutional returns list, legacy returns single float
+        tp_val = signal_result.get('take_profit', signal_result.get('tp'))
+        if isinstance(tp_val, list) and tp_val:
+            tp = tp_val[0]  # Use TP1
+        else:
+            tp = tp_val
+        
+        if not all([direction, entry, sl, tp]):
+            self._log('ERROR', 'Incomplete signal data, cannot execute')
+            return
+        
+        # Calculate position size
+        position = self.risk_manager.calculate_position_size(
+            symbol=self.config.symbol,
+            entry_price=entry,
+            stop_loss=sl,
+            take_profit=tp,
+            risk_percent=self.config.risk_percent
+        )
+        
+        if not position.is_valid:
+            self._log('WARNING', f'Position size invalid: {position.warning}')
+            return
+        
+        self._log('INFO',
+            f'📊 Grade {grade} | Position: {position.lot_size:.4f} lots | '
+            f'Risk: ${position.risk_amount:.2f}',
+            position.to_dict()
+        )
+        
+        # Validate trade
+        validation = await self.risk_manager.validate_trade(
+            symbol=self.config.symbol,
+            entry_price=entry,
+            stop_loss=sl,
+            take_profit=tp,
+            lot_size=position.lot_size
+        )
+        
+        if not validation['is_valid']:
+            for err in validation['errors']:
+                self._log('ERROR', err)
+            return
+        
+        # Execute trade
+        signal_dict = {
+            'action': direction,
+            'entry_price': entry,
+            'sl': sl,
+            'tp': tp,
+            'symbol': self.config.symbol,
+            'risk_reward_ratio': validation['rrr'],
+            'confidence': signal_result.get('confidence', 0),
+        }
+        
+        result = await self.executor.execute_signal(signal_dict, self.risk_manager)
+        
+        if result.status == OrderStatus.FILLED:
+            self._log('INFO', f'✅ ORDER FILLED (Grade {grade}): {result.order_id}', result.to_dict())
+            
+            if signal_result.get('source') == 'institutional':
+                self.stats['institutional_trades'] += 1
+            
+            # Create trade record
+            trade = TradeRecord(
+                id=result.order_id,
+                symbol=self.config.symbol,
+                side=direction,
+                entry_price=result.filled_price or entry,
+                exit_price=None,
+                quantity=result.filled_quantity,
+                stop_loss=sl,
+                take_profit=tp,
+                status='open',
+                pnl=0.0,
+                opened_at=datetime.now(),
+                closed_at=None
+            )
+            
+            self.open_positions.append(trade)
+            self.stats['total_trades'] += 1
+            
+            if self.on_trade:
+                self.on_trade(trade)
+        else:
+            self._log('ERROR', f'❌ ORDER FAILED: {result.error_message}', result.to_dict())
+    
+    def record_trade_result(self, won: bool, grade: str = 'B'):
+        """
+        Record trade result for institutional discipline tracking.
+        Call when a trade closes (TP hit or SL hit).
+        """
+        # Map timeframe to candle duration in ms
+        tf_map = {
+            '1m': 60_000, '5m': 300_000, '15m': 900_000,
+            '30m': 1_800_000, '1h': 3_600_000, '4h': 14_400_000,
+            '1d': 86_400_000,
+        }
+        duration_ms = tf_map.get(self.config.timeframe, 3_600_000)
+        self.strategy.record_result(won, grade, duration_ms)
+        
+        if won:
+            self.stats['winning_trades'] += 1
+        else:
+            self.stats['losing_trades'] += 1
     
     async def _execute_signal(self, signal: TradeSignal):
         """Execute trade signal"""
@@ -501,8 +650,11 @@ class TradingBot:
             'timeframe': self.config.timeframe,
             'mode': 'DRY_RUN' if self.config.dry_run else 'LIVE',
             'equity': self.config.equity,
+            'institutional_mode': self.config.institutional_mode,
             'current_signal': self.current_signal.to_dict() if self.current_signal else None,
             'last_analysis': self.last_analysis,
+            'last_institutional': self.last_institutional,
+            'discipline': self.strategy.discipline_state if self.strategy else None,
             'open_positions': [p.to_dict() for p in self.open_positions],
             'stats': self.stats
         }

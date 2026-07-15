@@ -5,21 +5,21 @@ import React, { useState } from 'react';
 interface MobileBotControlProps {
   status: 'running' | 'stopped' | 'error';
   mode: 'dry-run' | 'live';
-  onStart: () => void;
-  onStop: () => void;
-  onModeChange: (mode: 'dry-run' | 'live') => void;
+  onStartAction: () => void;
+  onStopAction: () => void;
+  onModeChangeAction: (mode: 'dry-run' | 'live') => void;
   aiEnabled: boolean;
-  onAiToggle: (enabled: boolean) => void;
+  onAiToggleAction: (enabled: boolean) => void;
 }
 
 export default function MobileBotControl({
   status,
   mode,
-  onStart,
-  onStop,
-  onModeChange,
+  onStartAction,
+  onStopAction,
+  onModeChangeAction,
   aiEnabled,
-  onAiToggle
+  onAiToggleAction
 }: MobileBotControlProps) {
   const [showAdvanced, setShowAdvanced] = useState(false);
 
@@ -46,7 +46,7 @@ export default function MobileBotControl({
 
         {/* Main Action Button */}
         <button
-          onClick={isRunning ? onStop : onStart}
+          onClick={isRunning ? onStopAction : onStartAction}
           className={`w-full py-4 rounded-xl font-bold text-lg transition-all
                      active:scale-[0.98] min-h-[56px]
                      ${isRunning 
@@ -65,7 +65,7 @@ export default function MobileBotControl({
           <span className="text-gray-300">Mode</span>
           <div className="flex rounded-lg overflow-hidden">
             <button
-              onClick={() => onModeChange('dry-run')}
+              onClick={() => onModeChangeAction('dry-run')}
               className={`px-4 py-2 text-sm font-medium min-h-[44px] transition-colors
                          ${mode === 'dry-run' 
                            ? 'bg-yellow-600 text-white' 
@@ -75,7 +75,7 @@ export default function MobileBotControl({
               DRY-RUN
             </button>
             <button
-              onClick={() => onModeChange('live')}
+              onClick={() => onModeChangeAction('live')}
               className={`px-4 py-2 text-sm font-medium min-h-[44px] transition-colors
                          ${mode === 'live' 
                            ? 'bg-red-600 text-white' 
@@ -91,7 +91,7 @@ export default function MobileBotControl({
         <div className="flex items-center justify-between">
           <span className="text-gray-300">AI Analysis</span>
           <button
-            onClick={() => onAiToggle(!aiEnabled)}
+            onClick={() => onAiToggleAction(!aiEnabled)}
             className={`relative w-14 h-8 rounded-full transition-colors ${
               aiEnabled ? 'bg-pink-600' : 'bg-[#30363D]'
             }`}

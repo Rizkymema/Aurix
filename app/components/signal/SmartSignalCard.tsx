@@ -31,12 +31,12 @@ interface AIAnalysisResponse {
 
 interface ExtendedSignalCardProps extends SignalCardProps {
   aiResponse?: AIAnalysisResponse | null;
-  source?: 'ai' | 'local' | null;
+  source?: 'ai' | 'local' | 'unified' | 'institutional' | null;
   // AI toggle controls
   aiEnabled?: boolean;
-  onAiToggle?: (enabled: boolean) => void;
+  onAiToggleAction?: (enabled: boolean) => void;
   autoRefreshEnabled?: boolean;
-  onAutoRefreshToggle?: (enabled: boolean) => void;
+  onAutoRefreshToggleAction?: (enabled: boolean) => void;
 }
 
 // Format price with appropriate decimals
@@ -61,9 +61,9 @@ export function SmartSignalCard({
   aiResponse, 
   source,
   aiEnabled = false,
-  onAiToggle,
+  onAiToggleAction,
   autoRefreshEnabled = false,
-  onAutoRefreshToggle,
+  onAutoRefreshToggleAction,
 }: ExtendedSignalCardProps) {
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
 
@@ -101,17 +101,17 @@ export function SmartSignalCard({
   // AI Controls Header Component
   const AIControlsHeader = () => (
     <div className="flex items-center gap-4 flex-wrap">
-      {onAiToggle && (
+      {onAiToggleAction && (
         <ToggleSwitch 
           enabled={aiEnabled} 
-          onToggle={onAiToggle} 
+          onToggle={onAiToggleAction} 
           label="AI Analysis" 
         />
       )}
-      {onAutoRefreshToggle && aiEnabled && (
+      {onAutoRefreshToggleAction && aiEnabled && (
         <ToggleSwitch 
           enabled={autoRefreshEnabled} 
-          onToggle={onAutoRefreshToggle} 
+          onToggle={onAutoRefreshToggleAction} 
           label="Auto Refresh" 
         />
       )}

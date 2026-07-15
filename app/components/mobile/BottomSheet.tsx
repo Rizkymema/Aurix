@@ -7,8 +7,8 @@ type SheetHeight = 'collapsed' | 'half' | 'full';
 interface BottomSheetProps {
   isOpen: boolean;
   height: SheetHeight;
-  onHeightChange: (height: SheetHeight) => void;
-  onClose: () => void;
+  onHeightChangeAction: (height: SheetHeight) => void;
+  onCloseAction: () => void;
   title: string;
   children: React.ReactNode;
 }
@@ -22,8 +22,8 @@ const HEIGHT_MAP: Record<SheetHeight, string> = {
 export default function BottomSheet({
   isOpen,
   height,
-  onHeightChange,
-  onClose,
+  onHeightChangeAction,
+  onCloseAction,
   title,
   children
 }: BottomSheetProps) {
@@ -44,14 +44,14 @@ export default function BottomSheet({
     if (diff > 50) {
       // Swiped down
       if (height === 'full') {
-        onHeightChange('half');
+        onHeightChangeAction('half');
       } else {
-        onClose();
+        onCloseAction();
       }
     } else if (diff < -50) {
       // Swiped up
       if (height === 'half') {
-        onHeightChange('full');
+        onHeightChangeAction('full');
       }
     }
   };
@@ -63,7 +63,7 @@ export default function BottomSheet({
       {/* Backdrop */}
       <div 
         className="fixed inset-0 bg-black/50 z-40 transition-opacity"
-        onClick={onClose}
+        onClick={onCloseAction}
       />
 
       {/* Sheet */}

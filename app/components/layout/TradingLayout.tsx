@@ -14,16 +14,16 @@ interface TradingLayoutProps {
   price?: number;
   priceDirection?: 'up' | 'down' | 'neutral';
   timeframe?: string;
-  onTimeframeChange?: (tf: string) => void;
-  onSymbolChange?: (symbol: string) => void;
+  onTimeframeChangeAction?: (tf: string) => void;
+  onSymbolChangeAction?: (symbol: string) => void;
   // Bot props
   botStatus?: 'running' | 'stopped' | 'error';
   botMode?: 'dry-run' | 'live';
-  onBotStart?: () => void;
-  onBotStop?: () => void;
-  onBotModeChange?: (mode: 'dry-run' | 'live') => void;
+  onBotStartAction?: () => void;
+  onBotStopAction?: () => void;
+  onBotModeChangeAction?: (mode: 'dry-run' | 'live') => void;
   aiEnabled?: boolean;
-  onAiToggle?: (enabled: boolean) => void;
+  onAiToggleAction?: (enabled: boolean) => void;
   // Signal props
   signal?: {
     type: 'BUY' | 'SELL' | 'HOLD';
@@ -59,15 +59,15 @@ export function TradingLayout({
   price = 0,
   priceDirection = 'neutral',
   timeframe = '1m',
-  onTimeframeChange = () => {},
-  onSymbolChange = () => {},
+  onTimeframeChangeAction = () => {},
+  onSymbolChangeAction = () => {},
   botStatus = 'stopped',
   botMode = 'dry-run',
-  onBotStart = () => {},
-  onBotStop = () => {},
-  onBotModeChange = () => {},
+  onBotStartAction = () => {},
+  onBotStopAction = () => {},
+  onBotModeChangeAction = () => {},
   aiEnabled = true,
-  onAiToggle = () => {},
+  onAiToggleAction = () => {},
   signal = null,
   sentimentData,
 }: TradingLayoutProps) {
@@ -89,15 +89,15 @@ export function TradingLayout({
       price={price}
       priceDirection={priceDirection}
       timeframe={timeframe}
-      onTimeframeChange={onTimeframeChange}
-      onSymbolChange={onSymbolChange}
+      onTimeframeChangeAction={onTimeframeChangeAction}
+      onSymbolChangeAction={onSymbolChangeAction}
       botStatus={botStatus}
       botMode={botMode}
-      onBotStart={onBotStart}
-      onBotStop={onBotStop}
-      onBotModeChange={onBotModeChange}
+      onBotStartAction={onBotStartAction}
+      onBotStopAction={onBotStopAction}
+      onBotModeChangeAction={onBotModeChangeAction}
       aiEnabled={aiEnabled}
-      onAiToggle={onAiToggle}
+      onAiToggleAction={onAiToggleAction}
       signal={signal}
       sentimentData={sentimentData}
     >

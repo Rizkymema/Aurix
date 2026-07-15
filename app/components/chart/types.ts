@@ -96,6 +96,38 @@ export const CHART_COLORS: ChartColors = {
   swingLow: '#4ADE80',        // Light green for swing lows - fades with older markers
 };
 
+// ── Data Source Types ──
+
+export type DataSourceType = 'crypto' | 'forex' | 'commodity';
+
+export type ForexSymbol = 'XAUUSD' | 'XAGUSD' | 'EURUSD' | 'GBPUSD' | 'USDJPY';
+
+export const FOREX_SYMBOLS: ForexSymbol[] = ['XAUUSD', 'XAGUSD', 'EURUSD', 'GBPUSD', 'USDJPY'];
+
+/** Determine whether a symbol is forex/commodity (not available on Binance WS) */
+export function isForexSymbol(symbol: string): boolean {
+  return FOREX_SYMBOLS.includes(symbol.toUpperCase() as ForexSymbol);
+}
+
+/** Get the data source type for a symbol */
+export function getDataSourceType(symbol: string): DataSourceType {
+  const upper = symbol.toUpperCase();
+  if (['XAUUSD', 'XAGUSD'].includes(upper)) return 'commodity';
+  if (FOREX_SYMBOLS.includes(upper as ForexSymbol)) return 'forex';
+  return 'crypto';
+}
+
+/** Get appropriate decimal precision for symbol */
+export function getSymbolDecimals(symbol: string): number {
+  const upper = symbol.toUpperCase();
+  if (upper.includes('JPY')) return 3;
+  if (['XAUUSD'].includes(upper)) return 2;
+  if (['XAGUSD'].includes(upper)) return 3;
+  if (['EURUSD', 'GBPUSD'].includes(upper)) return 5;
+  if (upper.includes('DOGE') || upper.includes('SHIB')) return 6;
+  return 2;
+}
+
 export interface TickerInfo {
   symbol: string;
   price: number;

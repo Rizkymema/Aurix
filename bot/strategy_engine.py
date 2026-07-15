@@ -3,11 +3,17 @@ StrategyEngine - Otak yang Menentukan Arah Trading
 ===================================================
 Menganalisa data market untuk menghasilkan keputusan Entry yang presisi.
 
-Logic:
+Logic (Legacy):
 - Trend Filter: EMA 200 untuk filter arah
 - Trigger: EMA 9 & EMA 21 crossover searah tren
 - SL: Swing Low/High terakhir
-- TP: Minimal 1.5x jarak SL (RRR 1:1.5)
+- TP: Minimal 2.0x jarak SL (RRR 1:2.0)
+
+Institutional Mode (New):
+- 11-step scoring pipeline (market context → grading → discipline)
+- Grades: A+ ≥ 90, A 80-89, B 70-79, <70 → NO_TRADE
+- Anti-revenge cooldown after consecutive losses
+- Full score breakdown with step-by-step audit trail
 """
 
 import numpy as np
@@ -15,6 +21,18 @@ from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 import logging
+
+try:
+    from institutional_engine import (
+        run_institutional_engine,
+        DisciplineState,
+        InstitutionalOutput,
+        record_trade_result,
+        tick_cooldown,
+    )
+    HAS_INSTITUTIONAL = True
+except ImportError:
+    HAS_INSTITUTIONAL = False
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -71,8 +89,9 @@ class StrategyEngine:
         ema_medium: int = 21,
         ema_slow: int = 200,
         swing_lookback: int = 10,
-        min_rrr: float = 1.5,
-        min_confidence: float = 60.0
+        min_rrr: float = 2.0,
+        min_confidence: float = 70.0,
+        institutional_mode: bool = True
     ):
         """
         Initialize Strategy Engine
@@ -82,8 +101,9 @@ class StrategyEngine:
             ema_medium: Period EMA medium (default: 21)
             ema_slow: Period EMA lambat untuk trend filter (default: 200)
             swing_lookback: Periode untuk deteksi swing point (default: 10)
-            min_rrr: Minimum Risk Reward Ratio (default: 1.5)
-            min_confidence: Minimum confidence untuk signal (default: 60%)
+            min_rrr: Minimum Risk Reward Ratio (default: 2.0)
+            min_confidence: Minimum confidence untuk signal (default: 70)
+            institutional_mode: Use 11-step institutional engine (default: True)
         """
         self.ema_fast = ema_fast
         self.ema_medium = ema_medium
@@ -91,12 +111,18 @@ class StrategyEngine:
         self.swing_lookback = swing_lookback
         self.min_rrr = min_rrr
         self.min_confidence = min_confidence
+        self.institutional_mode = institutional_mode and HAS_INSTITUTIONAL
         
         # State untuk tracking crossover
         self._prev_ema_fast = None
         self._prev_ema_medium = None
         
+        # Institutional discipline state
+        self._discipline = DisciplineState() if HAS_INSTITUTIONAL else None
+        
         logger.info(f"StrategyEngine initialized with EMA {ema_fast}/{ema_medium}/{ema_slow}")
+        if self.institutional_mode:
+            logger.info("📊 Institutional 11-step engine ACTIVE (min RRR 2.0, grade ≥ B)")
     
     def calculate_ema(self, data: np.ndarray, period: int) -> np.ndarray:
         """
@@ -393,6 +419,11 @@ class StrategyEngine:
         risk_reward_ratio = tp_distance / sl_distance
         reason_parts.append(f"TP dengan RRR 1:{risk_reward_ratio:.1f}")
         
+        # Reject if RRR below institutional minimum
+        if risk_reward_ratio < self.min_rrr:
+            logger.info(f"RRR {risk_reward_ratio:.2f} < {self.min_rrr} → NO SIGNAL")
+            return None
+        
         # =======================
         # STEP 5: CALCULATE CONFIDENCE
         # =======================
@@ -478,6 +509,144 @@ class StrategyEngine:
             'ready_for_sell': current_close < ema_200[-1] and ema_9[-1] >= ema_21[-1],
         }
 
+    # =======================
+    # INSTITUTIONAL ENGINE INTEGRATION
+    # =======================
+    
+    def get_institutional_signal(
+        self,
+        ohlcv_data: List[Dict[str, Any]],
+        zones: Optional[List[Dict]] = None,
+        news: Optional[List[Dict]] = None,
+        sentiment: Optional[Dict] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Run the 11-step institutional analysis pipeline.
+        
+        Returns:
+            InstitutionalOutput.to_dict() if institutional mode active,
+            None if not available or insufficient data.
+        """
+        if not self.institutional_mode:
+            logger.info("Institutional mode disabled, falling back to legacy signal")
+            return None
+        
+        if len(ohlcv_data) < 200:
+            logger.warning(f"Institutional engine needs 200+ candles, got {len(ohlcv_data)}")
+            return None
+        
+        # Convert OHLCV dicts to format institutional engine expects
+        candles = []
+        for c in ohlcv_data:
+            candles.append({
+                'time': c.get('timestamp', c.get('time', 0)),
+                'open': c['open'],
+                'high': c['high'],
+                'low': c['low'],
+                'close': c['close'],
+                'volume': c.get('volume', 0),
+            })
+        
+        result: InstitutionalOutput = run_institutional_engine(
+            candles=candles,
+            zones=zones,
+            news=news,
+            sentiment=sentiment,
+            discipline=self._discipline,
+        )
+        
+        # Update discipline state
+        self._discipline = result.discipline
+        
+        # Log grade
+        grade = result.grade
+        decision = result.decision
+        if decision == 'TRADE':
+            logger.info(
+                f"🎯 INSTITUTIONAL SIGNAL: {result.direction} "
+                f"Grade {grade} (confidence {result.confidence}/100) "
+                f"Entry {result.entry} SL {result.stop_loss} "
+                f"TP {result.take_profit}"
+            )
+        else:
+            reasons = ' | '.join(result.reason)
+            logger.info(f"⏸️ NO TRADE: {reasons}")
+        
+        return result.to_dict()
+    
+    def record_result(self, won: bool, grade: str, candle_duration_ms: float = 60_000):
+        """
+        Record trade result for discipline tracking.
+        
+        Args:
+            won: True if trade hit TP, False if hit SL
+            grade: Grade of the trade (A+, A, B)
+            candle_duration_ms: Duration of one candle in milliseconds
+        """
+        if not HAS_INSTITUTIONAL or self._discipline is None:
+            return
+        
+        self._discipline = record_trade_result(
+            self._discipline, won, grade, candle_duration_ms
+        )
+        
+        if self._discipline.cooldown_active:
+            logger.warning(
+                f"🛑 COOLDOWN ACTIVE: {self._discipline.cooldown_reason} "
+                f"({self._discipline.locked_candles_remaining} candles)"
+            )
+        elif won:
+            logger.info("✅ Win recorded, discipline state reset")
+    
+    def tick_discipline(self):
+        """Call on each candle close to decrement cooldown counter."""
+        if HAS_INSTITUTIONAL and self._discipline is not None:
+            self._discipline = tick_cooldown(self._discipline)
+    
+    @property
+    def discipline_state(self) -> Optional[Dict]:
+        """Get current discipline state as dict."""
+        if self._discipline is None:
+            return None
+        return self._discipline.to_dict()
+    
+    def get_signal_with_institutional(
+        self,
+        ohlcv_data: List[Dict[str, Any]],
+        zones: Optional[List[Dict]] = None,
+        news: Optional[List[Dict]] = None,
+        sentiment: Optional[Dict] = None,
+    ) -> Dict[str, Any]:
+        """
+        Combined signal: tries institutional first, falls back to legacy.
+        Returns a unified dict with 'source' key indicating which engine.
+        """
+        # Try institutional first
+        if self.institutional_mode:
+            inst = self.get_institutional_signal(ohlcv_data, zones, news, sentiment)
+            if inst is not None:
+                inst['source'] = 'institutional'
+                return inst
+        
+        # Fallback to legacy
+        legacy = self.get_signal(ohlcv_data)
+        if legacy:
+            result = legacy.to_dict()
+            result['source'] = 'legacy'
+            result['grade'] = 'B'  # Legacy signals are at most B grade
+            result['decision'] = 'TRADE'
+            result['direction'] = result['action']
+            return result
+        
+        return {
+            'source': 'legacy',
+            'decision': 'NO_TRADE',
+            'direction': 'NONE',
+            'grade': 'NO_TRADE',
+            'confidence': 0,
+            'reason': ['No valid setup found'],
+        }
+
 
 # =======================
 # USAGE EXAMPLE
@@ -489,8 +658,9 @@ if __name__ == "__main__":
         ema_medium=21,
         ema_slow=200,
         swing_lookback=10,
-        min_rrr=1.5,
-        min_confidence=60.0
+        min_rrr=2.0,
+        min_confidence=70.0,
+        institutional_mode=True
     )
     
     # Simulasi data OHLCV (dalam production, ambil dari API)

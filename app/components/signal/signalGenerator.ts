@@ -180,10 +180,35 @@ export function generateSmartSignal(
     tp2 = currentPrice - (sl - currentPrice) * 3; // 1:3 RRR
   }
   
-  // Calculate Risk/Reward Ratio
+  // ✅ CRITICAL FIX: Calculate Risk/Reward Ratio with validation
   const risk = Math.abs(currentPrice - sl);
   const reward = Math.abs(tp1 - currentPrice);
+  
+  // Validate risk and reward before division
+  if (risk === 0 || isNaN(risk) || !isFinite(risk)) {
+    console.warn('[Signal] Invalid risk calculation:', { currentPrice, sl, risk });
+    return null;
+  }
+  
+  if (reward === 0 || isNaN(reward) || !isFinite(reward)) {
+    console.warn('[Signal] Invalid reward calculation:', { currentPrice, tp1, reward });
+    return null;
+  }
+  
+  // Check if risk is too small (< 0.01% of price - likely error)
+  const minRisk = currentPrice * 0.0001;
+  if (risk < minRisk) {
+    console.warn('[Signal] Risk too small, probably bad SL:', { risk, minRisk, currentPrice, sl });
+    return null;
+  }
+  
   const riskRewardRatio = reward / risk;
+  
+  // Sanity check RRR
+  if (!isFinite(riskRewardRatio) || riskRewardRatio < 0) {
+    console.warn('[Signal] Invalid RRR:', { riskRewardRatio, risk, reward });
+    return null;
+  }
   
   // Calculate validity score
   const validityScore = calculateValidityScore({
