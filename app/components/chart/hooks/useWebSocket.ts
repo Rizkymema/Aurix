@@ -337,7 +337,13 @@ export function useWebSocket({
     dataSource?: string;
     marketStatus?: string | null;
   }) => {
-    if (meta.feedStatus) setFeedStatus(meta.feedStatus);
+    const source = meta.dataSource?.toLowerCase() || '';
+    const liveSource = source.startsWith('mt5-bridge:') || source.includes('tradermade-live');
+    if (liveSource) {
+      setFeedStatus('realtime');
+    } else if (meta.feedStatus) {
+      setFeedStatus(meta.feedStatus);
+    }
     if (meta.dataSource) setDataSource(meta.dataSource);
     if (meta.marketStatus !== undefined) setMarketStatus(meta.marketStatus ?? null);
   }, []);
@@ -657,13 +663,8 @@ export function useWebSocket({
       const tickIntervalMs = isGold ? 1000 : 2000; // XAUUSD: 1s ticks, others: 2s ticks
       
       console.log(`[useWebSocket] ${sym} is forex — REST polling ${forexPollMs}ms + tick polling ${tickIntervalMs}ms ${isGold ? '(GOLD REALTIME)' : ''}`);
-      updateFeedMeta({
-        feedStatus: 'delayed',
-        dataSource: 'Forex polling',
-        marketStatus: null,
-      });
       startPolling(forexPollMs);
-      // Tick-level updates for forming candle (realtime price via GoldPrice.org for XAUUSD)
+      // Feed metadata is taken from /api/forex/ticker or /api/forex/klines.
       startForexTickPolling(tickIntervalMs);
       setConnState('polling');
       return;
