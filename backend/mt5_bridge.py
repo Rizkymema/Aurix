@@ -17,6 +17,25 @@ TIMEFRAME_MAP = {
 }
 
 
+def detect_broker_time_offset_seconds(reference_timestamp: int) -> int:
+    """Return the MT5 server clock offset when the terminal reports broker-local time."""
+    now_utc = int(datetime.now(timezone.utc).timestamp())
+    candidate = int(reference_timestamp) - now_utc
+
+    # A current quote should not be more than half a day away from UTC. This
+    # protects historical/off-market data from being adjusted accidentally.
+    if abs(candidate) > 12 * 60 * 60:
+        return 0
+
+    # Broker clocks use whole-minute offsets. Rounding avoids a one-second
+    # mismatch between the quote timestamp and the server clock check.
+    return round(candidate / 60) * 60
+
+
+def normalize_timestamp(timestamp: int, broker_offset_seconds: int) -> int:
+    return int(timestamp) - broker_offset_seconds
+
+
 def fail(message: str, code: int = 1) -> None:
     print(json.dumps({"ok": False, "error": message}))
     sys.exit(code)
@@ -85,6 +104,9 @@ def get_tick(symbol: str) -> dict:
     if price is None:
         raise RuntimeError(f"No usable price for symbol: {symbol}")
 
+    broker_offset_seconds = detect_broker_time_offset_seconds(tick.time)
+    normalized_time = normalize_timestamp(tick.time, broker_offset_seconds)
+
     return {
         "symbol": symbol,
         "price": price,
@@ -93,8 +115,8 @@ def get_tick(symbol: str) -> dict:
         "last": tick.last,
         "spread": info.spread,
         "digits": info.digits,
-        "time": tick.time,
-        "time_iso": datetime.fromtimestamp(tick.time, tz=timezone.utc).isoformat(),
+        "time": normalized_time,
+        "time_iso": datetime.fromtimestamp(normalized_time, tz=timezone.utc).isoformat(),
         "source": f"MT5-local:{account.server if account else 'unknown'}",
     }
 
@@ -107,15 +129,19 @@ def get_candles(symbol: str, interval: str, limit: int) -> dict:
         raise ValueError(f"Unsupported timeframe: {interval}")
 
     rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, limit)
+    latest_tick = mt5.symbol_info_tick(symbol)
     account = mt5.account_info()
     if rates is None:
         raise RuntimeError(f"No rates returned for {symbol} {interval}")
+
+    reference_time = latest_tick.time if latest_tick is not None else int(rates[-1]["time"])
+    broker_offset_seconds = detect_broker_time_offset_seconds(reference_time)
 
     candles = []
     for rate in rates:
         candles.append(
             {
-                "time": int(rate["time"]),
+                "time": normalize_timestamp(int(rate["time"]), broker_offset_seconds),
                 "open": float(rate["open"]),
                 "high": float(rate["high"]),
                 "low": float(rate["low"]),
