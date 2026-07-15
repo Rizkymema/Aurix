@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { adjustSignalConfidence, isMarketConditionFavorable, getMarketAnalysis } from '@/app/lib/kolAPI';
 import { checkRateLimit } from '@/app/lib/rateLimit';
 import { getClientIp } from '@/app/lib/apiSecurity';
+import { runProbabilityEngine } from '@/app/lib/probabilityEngine';
 
 /**
  * AI Trading Decision Engine - Signal Generator API
@@ -333,6 +334,66 @@ function getDecimals(price: number): number {
   return 8;                          // Small altcoins
 }
 
+function generateProbabilitySignal(
+  candles: CandlestickData[],
+  symbol: string,
+  timeframe: string,
+  botMode: 'LIVE' | 'DRY_RUN'
+): TradingSignal | null {
+  if (!candles || candles.length < 200) return null;
+
+  const result = runProbabilityEngine({
+    symbol,
+    timeframe,
+    candles,
+    accountBalance: 10000,
+    riskPercent: 1,
+  });
+
+  if (result.signal === 'WAIT') {
+    return {
+      market: symbol,
+      timeframe,
+      signal: 'WAIT',
+      entry: null,
+      stop_loss: null,
+      take_profit_1: null,
+      take_profit_2: null,
+      bot_mode: botMode,
+      risk_reward: null,
+      confidence: result.confidenceScore,
+      timestamp: new Date().toISOString(),
+      reason: result.technicalJustification || 'Probability engine selected WAIT',
+    };
+  }
+
+  if (
+    result.entryPrice === null ||
+    result.stopLoss === null ||
+    result.takeProfit1 === null ||
+    result.takeProfit2 === null
+  ) {
+    return null;
+  }
+
+  const decimals = getDecimals(candles[candles.length - 1].close);
+
+  return {
+    market: symbol,
+    timeframe,
+    signal: result.signal,
+    entry: Number(result.entryPrice.toFixed(decimals)),
+    stop_loss: Number(result.stopLoss.toFixed(decimals)),
+    take_profit_1: Number(result.takeProfit1.toFixed(decimals)),
+    take_profit_2: Number(result.takeProfit2.toFixed(decimals)),
+    bot_mode: botMode,
+    risk_reward: Number(result.riskRewardRatio.toFixed(2)),
+    confidence: result.confidenceScore,
+    timestamp: new Date(result.timestamp).toISOString(),
+    reason: result.technicalJustification,
+  };
+}
+
 // POST handler - generate signal from provided candles
 export async function POST(request: NextRequest) {
   try {
@@ -355,12 +416,22 @@ export async function POST(request: NextRequest) {
       aiEnabled = true
     } = body;
     
-    // Generate base signal
+    const normalizedSymbol = symbol.toUpperCase();
+    const normalizedBotMode = botMode.toUpperCase() === 'LIVE' ? 'LIVE' : 'DRY_RUN';
+    const probabilitySignal = aiEnabled
+      ? generateProbabilitySignal(candles, normalizedSymbol, timeframe, normalizedBotMode)
+      : null;
+
+    if (probabilitySignal) {
+      return NextResponse.json(probabilitySignal);
+    }
+
+    // Generate fallback signal when 200 candles are not available.
     const signal = generateSignal(
       candles,
-      symbol.toUpperCase(),
+      normalizedSymbol,
       timeframe,
-      botMode.toUpperCase() === 'LIVE' ? 'LIVE' : 'DRY_RUN',
+      normalizedBotMode,
       aiEnabled
     );
     
@@ -369,8 +440,12 @@ export async function POST(request: NextRequest) {
       try {
         const marketAnalysis = await getMarketAnalysis(symbol);
         
-        // Adjust confidence based on market sentiment
-        if (marketAnalysis.sentiment || marketAnalysis.trend) {
+        const hasLiveMarketContext =
+          marketAnalysis.sentiment?.source === 'api' ||
+          marketAnalysis.trend?.source === 'api';
+
+        // Adjust confidence only with live market context, never mock fallback data.
+        if (hasLiveMarketContext && (marketAnalysis.sentiment || marketAnalysis.trend)) {
           signal.confidence = adjustSignalConfidence(
             signal.confidence,
             signal.signal as 'BUY' | 'SELL',
@@ -385,7 +460,7 @@ export async function POST(request: NextRequest) {
         }
         
         // Check if market conditions are favorable
-        if (!isMarketConditionFavorable(marketAnalysis.sentiment, marketAnalysis.trend)) {
+        if (hasLiveMarketContext && !isMarketConditionFavorable(marketAnalysis.sentiment, marketAnalysis.trend)) {
           signal.confidence = Math.max(0, signal.confidence - 15);
           signal.reason += ' | ⚠️ Market conditions not ideal';
         }
