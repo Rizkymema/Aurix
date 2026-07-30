@@ -132,18 +132,25 @@ export function useProbabilityEngine(config: ProbabilityEngineConfig): Probabili
     if (config.autoRefreshMs && config.autoRefreshMs > 0) {
       timerRef.current = setInterval(runEngine, config.autoRefreshMs);
       return () => {
-        if (timerRef.current) clearInterval(timerRef.current);
+        if (timerRef.current) {
+          clearInterval(timerRef.current);
+          timerRef.current = null;
+        }
       };
     }
   }, [config.autoRefreshMs, runEngine]);
 
-  // Run on candle data change (debounced)
+  // Run on candle count change only (not every tick price update)
   const prevCandleCountRef = useRef(0);
+  const runningRef = useRef(false);
   useEffect(() => {
     const count = config.candles?.length || 0;
-    if (count > 0 && count !== prevCandleCountRef.current) {
+    if (count > 0 && count !== prevCandleCountRef.current && !runningRef.current) {
       prevCandleCountRef.current = count;
-      runEngine();
+      runningRef.current = true;
+      Promise.resolve(runEngine()).finally(() => {
+        runningRef.current = false;
+      });
     }
   }, [config.candles?.length, runEngine]);
 

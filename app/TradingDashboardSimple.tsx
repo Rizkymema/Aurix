@@ -89,6 +89,9 @@ export default function TradingDashboard() {
   
   // Track current symbol to prevent stale data
   const symbolRef = useRef<string>('BTCUSDT');
+  const previousCloseRef = useRef<number | null>(null);
+  const lastFeedWarningRef = useRef<string | null>(null);
+  const lastExecutedSignalRef = useRef<string | null>(null);
   
   const [symbol, setSymbol] = useState('BTCUSDT');
   const [timeframe, setTimeframe] = useState<Timeframe>('1m'); // Default 1m for realtime feel
@@ -96,21 +99,8 @@ export default function TradingDashboard() {
   const [candles, setCandles] = useState<CandlestickData[]>([]);
   const [mounted, setMounted] = useState(false);
   
-  // Update symbolRef when symbol changes
-  useEffect(() => {
-    console.log(`[Dashboard] 🔄 Symbol changed to: ${symbol}`);
-    symbolRef.current = symbol;
-    // Clear candles when symbol changes
-    setCandles([]);
-    setCurrentPrice(null);
-    setPreviousClose(null);
-    setPriceChange(0);
-    setPriceChangePercent(0);
-  }, [symbol]);
-  
   // REALTIME PRICE STATE (tidak boleh di-smooth atau di-delay)
   const [currentPrice, setCurrentPrice] = useState<number | null>(null);
-  const [previousClose, setPreviousClose] = useState<number | null>(null);
   const [priceChange, setPriceChange] = useState<number>(0);
   const [priceChangePercent, setPriceChangePercent] = useState<number>(0);
   const [lastTickTime, setLastTickTime] = useState<number | null>(null);
@@ -124,26 +114,45 @@ export default function TradingDashboard() {
   // Visible range for AI analysis
   const [visibleCandles, setVisibleCandles] = useState<CandlestickData[]>([]);
 
+  // Activity logs
+  const [logs, setLogs] = useState<Array<{time: string; type: string; message: string}>>([]);
+
+  // Update symbolRef when symbol changes
+  useEffect(() => {
+    console.log(`[Dashboard] 🔄 Symbol changed to: ${symbol}`);
+    symbolRef.current = symbol;
+    // Clear candles when symbol changes
+    setCandles([]);
+    setCurrentPrice(null);
+    previousCloseRef.current = null;
+    setPriceChange(0);
+    setPriceChangePercent(0);
+    lastExecutedSignalRef.current = null;
+  }, [symbol]);
+
+  // Memoize engine candles so identity only changes when OHLCV data changes
+  const engineCandles = useMemo(
+    () =>
+      candles.map(c => ({
+        time: typeof c.time === 'number' ? c.time : Math.floor(new Date(c.time as unknown as string).getTime() / 1000),
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+        volume: c.volume,
+      })),
+    [candles]
+  );
+
   // Probability Engine
   const probEngine = useProbabilityEngine({
     symbol,
     timeframe,
-    candles: candles.map(c => ({
-      time: typeof c.time === 'number' ? c.time : Math.floor(new Date(c.time as unknown as string).getTime() / 1000),
-      open: c.open,
-      high: c.high,
-      low: c.low,
-      close: c.close,
-      volume: c.volume,
-    })),
+    candles: engineCandles,
     accountBalance: 10000,
     riskPercent: 1,
     autoRefreshMs: 30000,
   });
-  
-  // Activity logs
-  const [logs, setLogs] = useState<Array<{time: string; type: string; message: string}>>([]);
-  const lastFeedWarningRef = useRef<string | null>(null);
   
   // Mobile detection
   const [isMobile, setIsMobile] = useState(false);
@@ -151,7 +160,8 @@ export default function TradingDashboard() {
   // Check for mobile screen on mount and resize
   useEffect(() => {
     const checkMobile = () => {
-      setIsMobile(window.innerWidth < 768);
+      const next = window.innerWidth < 768;
+      setIsMobile(prev => (prev === next ? prev : next));
     };
     
     checkMobile();
@@ -189,7 +199,7 @@ export default function TradingDashboard() {
       
       // Previous close untuk price change (24h ago atau candle pertama)
       const prevClose = data.length > 24 ? data[data.length - 25].close : data[0].close;
-      setPreviousClose(prevClose);
+      previousCloseRef.current = prevClose;
       
       // Calculate price change
       const change = lastCandle.close - prevClose;
@@ -220,9 +230,10 @@ export default function TradingDashboard() {
     setTickCount(prev => prev + 1);
     
     // Calculate realtime price change from previous close
-    if (previousClose !== null) {
-      const change = candle.close - previousClose;
-      const changePercent = (change / previousClose) * 100;
+    const baseline = previousCloseRef.current;
+    if (baseline !== null) {
+      const change = candle.close - baseline;
+      const changePercent = (change / baseline) * 100;
       setPriceChange(change);
       setPriceChangePercent(changePercent);
     }
@@ -236,13 +247,13 @@ export default function TradingDashboard() {
         // Update existing candle (incomplete candle getting ticks)
         return [...prev.slice(0, -1), candle];
       } else if (candle.time > lastCandle.time) {
-        // New candle closed - update previousClose for next period
-        setPreviousClose(lastCandle.close);
+        // New candle closed — update previous close baseline
+        previousCloseRef.current = lastCandle.close;
         return [...prev, candle];
       }
       return prev;
     });
-  }, [previousClose]);
+  }, []);
 
   // WebSocket for real-time data
   const { isConnected, error, feedStatus, dataSource, marketStatus } = useWebSocket({
@@ -265,7 +276,7 @@ export default function TradingDashboard() {
     enableAutoHideOnZoom: true,
   });
 
-  // Update visible candles when zoom changes
+  // Update visible candles when zoom changes (skip no-op updates)
   useEffect(() => {
     if (!chartRef.current || candles.length === 0) return;
     
@@ -277,11 +288,21 @@ export default function TradingDashboard() {
         const fromIdx = Math.max(0, Math.floor(logicalRange.from as number));
         const toIdx = Math.min(candles.length - 1, Math.ceil(logicalRange.to as number));
         const visible = candles.slice(fromIdx, toIdx + 1);
-        setVisibleCandles(visible);
+        setVisibleCandles(prev => {
+          if (
+            prev.length === visible.length &&
+            prev[0]?.time === visible[0]?.time &&
+            prev[prev.length - 1]?.time === visible[visible.length - 1]?.time &&
+            prev[prev.length - 1]?.close === visible[visible.length - 1]?.close
+          ) {
+            return prev;
+          }
+          return visible;
+        });
       }
     } catch {
       // Fallback: use all candles
-      setVisibleCandles(candles);
+      setVisibleCandles(prev => (prev === candles ? prev : candles));
     }
   }, [candles, zoomVisibleCount]);
 
@@ -381,6 +402,10 @@ export default function TradingDashboard() {
     const priceNearEntry = Math.abs(currentPrice - signal.entry) < entryTolerance;
     
     if (priceNearEntry && signal.confidence >= 70) {
+      const signalKey = `${signal.signal}:${signal.entry}:${signal.timestamp}`;
+      if (lastExecutedSignalRef.current === signalKey) return;
+      lastExecutedSignalRef.current = signalKey;
+
       addLog('TRADE', `🎯 Entry triggered @ ${formatPrice(currentPrice)}`);
       
       // Execute trade via API
@@ -786,7 +811,7 @@ export default function TradingDashboard() {
               onChange={(e) => setSymbol(e.target.value)}
               className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm font-medium"
             >
-              <option value="XAUUSD">XAUUSD (Gold)</option>
+              <option value="XAUUSD">XAUUSD</option>
               <option value="BTCUSDT">BTCUSDT</option>
               <option value="ETHUSDT">ETHUSDT</option>
               <option value="EURUSD">EURUSD</option>

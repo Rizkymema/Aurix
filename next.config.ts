@@ -1,7 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // Avoid Next.js HMR/build-indicator store loops during rapid Fast Refresh.
+  devIndicators: false,
 };
 
 export default nextConfig;

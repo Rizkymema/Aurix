@@ -75,36 +75,74 @@ export function useTradingSignal({
   
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const inFlightRef = useRef(false);
+
+  // Keep latest inputs in refs so fetchSignal stays identity-stable across ticks.
+  const candlesRef = useRef(candles);
+  const symbolRef = useRef(symbol);
+  const timeframeRef = useRef(timeframe);
+  const botModeRef = useRef(botMode);
+  const aiEnabledRef = useRef(aiEnabled);
+  candlesRef.current = candles;
+  symbolRef.current = symbol;
+  timeframeRef.current = timeframe;
+  botModeRef.current = botMode;
+  aiEnabledRef.current = aiEnabled;
 
   const fetchSignal = useCallback(async () => {
-    // Need at least 200 candles for proper analysis
-    if (candles.length < 50) {
-      setSignal({
-        ...DEFAULT_SIGNAL,
-        market: symbol,
-        timeframe,
-        bot_mode: botMode === 'live' ? 'LIVE' : 'DRY_RUN',
-        reason: `Waiting for data (${candles.length}/200 candles)`
+    const currentCandles = candlesRef.current;
+    const currentSymbol = symbolRef.current;
+    const currentTimeframe = timeframeRef.current;
+    const currentBotMode = botModeRef.current;
+    const currentAiEnabled = aiEnabledRef.current;
+
+    // Need at least 50 candles for proper analysis
+    if (currentCandles.length < 50) {
+      setSignal(prev => {
+        const reason = `Waiting for data (${currentCandles.length}/200 candles)`;
+        if (
+          prev?.market === currentSymbol &&
+          prev?.timeframe === currentTimeframe &&
+          prev?.reason === reason &&
+          prev?.signal === 'WAIT'
+        ) {
+          return prev;
+        }
+        return {
+          ...DEFAULT_SIGNAL,
+          market: currentSymbol,
+          timeframe: currentTimeframe,
+          bot_mode: currentBotMode === 'live' ? 'LIVE' : 'DRY_RUN',
+          reason,
+        };
       });
       return;
     }
     
-    if (!aiEnabled) {
-      setSignal({
-        ...DEFAULT_SIGNAL,
-        market: symbol,
-        timeframe,
-        bot_mode: botMode === 'live' ? 'LIVE' : 'DRY_RUN',
-        reason: 'AI Analysis is OFF'
+    if (!currentAiEnabled) {
+      setSignal(prev => {
+        if (prev?.reason === 'AI Analysis is OFF' && prev?.market === currentSymbol) {
+          return prev;
+        }
+        return {
+          ...DEFAULT_SIGNAL,
+          market: currentSymbol,
+          timeframe: currentTimeframe,
+          bot_mode: currentBotMode === 'live' ? 'LIVE' : 'DRY_RUN',
+          reason: 'AI Analysis is OFF',
+        };
       });
       return;
     }
+
+    if (inFlightRef.current) return;
     
     // Cancel previous request
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
     }
     abortControllerRef.current = new AbortController();
+    inFlightRef.current = true;
     
     setIsLoading(true);
     setError(null);
@@ -117,11 +155,11 @@ export function useTradingSignal({
           ...(APP_API_KEY ? { 'x-app-api-key': APP_API_KEY } : {}),
         },
         body: JSON.stringify({
-          candles,
-          symbol,
-          timeframe,
-          botMode: botMode === 'live' ? 'LIVE' : 'DRY_RUN',
-          aiEnabled,
+          candles: currentCandles,
+          symbol: currentSymbol,
+          timeframe: currentTimeframe,
+          botMode: currentBotMode === 'live' ? 'LIVE' : 'DRY_RUN',
+          aiEnabled: currentAiEnabled,
         }),
         signal: abortControllerRef.current.signal,
       });
@@ -145,21 +183,21 @@ export function useTradingSignal({
       setError(errMessage);
       setSignal({
         ...DEFAULT_SIGNAL,
-        market: symbol,
-        timeframe,
-        bot_mode: botMode === 'live' ? 'LIVE' : 'DRY_RUN',
+        market: currentSymbol,
+        timeframe: currentTimeframe,
+        bot_mode: currentBotMode === 'live' ? 'LIVE' : 'DRY_RUN',
         reason: `Error: ${errMessage}`
       });
     } finally {
+      inFlightRef.current = false;
       setIsLoading(false);
     }
-  }, [candles, symbol, timeframe, botMode, aiEnabled]);
+  }, []);
 
   // Fetch on mount and when dependencies change
   useEffect(() => {
     fetchSignal();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [symbol, timeframe, botMode, aiEnabled]); // Don't include candles to avoid too many fetches
+  }, [symbol, timeframe, botMode, aiEnabled, fetchSignal]);
   
   // Auto-refresh interval
   useEffect(() => {
@@ -178,6 +216,7 @@ export function useTradingSignal({
     return () => {
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
+        intervalRef.current = null;
       }
     };
   }, [autoRefresh, aiEnabled, refreshInterval, fetchSignal]);
